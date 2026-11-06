@@ -8,6 +8,8 @@ import requests
 import uuid
 import os
 
+from tts import TTSManager
+
 APP_TITLE = "JUGNU | Just an Unusually Genius Neural Utility"
 OLLAMA_URL = "http://localhost:11434/api/chat"
 MODEL = "llama3.2:3b"
@@ -45,6 +47,8 @@ class JugnuApp:
         self.busy = False
         self.dark_mode = self.load_settings()
         self.colors = DARK if self.dark_mode else LIGHT
+        self.tts = TTSManager()  # Offline voice output; runs on its own thread.
+        self.voice_enabled = self.load_voice_setting()
 
         self.build_ui()
         if self.chats:
@@ -78,10 +82,18 @@ class JugnuApp:
         except (FileNotFoundError, json.JSONDecodeError, OSError):
             return True
 
+    def load_voice_setting(self):
+        # Voice output is off by default; the choice is remembered between launches.
+        try:
+            with open(SETTINGS_FILE, "r", encoding="utf-8") as f:
+                return bool(json.load(f).get("voice_enabled", False))
+        except (FileNotFoundError, json.JSONDecodeError, OSError, AttributeError):
+            return False
+
     def save_settings(self):
         try:
             with open(SETTINGS_FILE, "w", encoding="utf-8") as f:
-                json.dump({"dark_mode": self.dark_mode}, f)
+                json.dump({"dark_mode": self.dark_mode, "voice_enabled": self.voice_enabled}, f)
         except OSError:
             pass
 
@@ -116,6 +128,11 @@ class JugnuApp:
         self.clear_btn = tk.Button(self.sidebar, text="▤  Clear Current Chat", command=self.clear_chat,
                                    relief="flat", pady=10)
         self.clear_btn.pack(fill="x", padx=12, pady=(4, 8))
+        self.voice_btn = tk.Button(self.sidebar, text="🔇  Voice: Off", command=self.toggle_voice,
+                                   relief="flat", pady=10)
+        self.voice_btn.pack(fill="x", padx=12, pady=(0, 8))
+        if not self.tts.available:
+            self.voice_btn.configure(state="disabled")  # pyttsx3 not installed
         self.theme_btn = tk.Button(self.sidebar, text="☼  Light Mode", command=self.toggle_theme,
                                    relief="flat", pady=10)
         self.theme_btn.pack(fill="x", padx=12, pady=(0, 12))
@@ -186,9 +203,10 @@ class JugnuApp:
         self.status.configure(bg=c["accent"], fg="#D1FAE5")
         self.history_list.configure(bg=c["sidebar"], fg=c["text"],
                                     selectbackground=c["accent"], selectforeground="white")
-        for btn in [self.new_btn, self.theme_btn]:
+        for btn in [self.new_btn, self.theme_btn, self.voice_btn]:
             btn.configure(bg=c["accent"], fg="white", activebackground=c["accent2"],
                           activeforeground="white", cursor="hand2")
+        self.voice_btn.configure(text="🔊  Voice: On" if self.voice_enabled else "🔇  Voice: Off")
         self.clear_btn.configure(bg=c["danger"], fg=c["accent2"], activebackground=c["danger"],
                                  activeforeground=c["text"], cursor="hand2")
         self.input_box.configure(bg=c["entry"], fg=c["text"], insertbackground=c["text"])
@@ -203,6 +221,17 @@ class JugnuApp:
         self.colors = DARK if self.dark_mode else LIGHT
         self.save_settings()
         self.apply_theme()
+
+    def toggle_voice(self):
+        self.voice_enabled = not self.voice_enabled
+        if not self.voice_enabled:
+            self.tts.stop()  # Muting silences the current reply immediately.
+        self.voice_btn.configure(text="🔊  Voice: On" if self.voice_enabled else "🔇  Voice: Off")
+        self.save_settings()
+
+    def on_close(self):
+        self.tts.shutdown()
+        self.root.destroy()
 
     def refresh_history_list(self):
         selected = self.current_id
@@ -222,6 +251,7 @@ class JugnuApp:
 
     def new_chat(self):
         # A blank chat is temporary. It must not create a history entry until a message is sent.
+        self.tts.stop()
         self.make_draft()
         self.refresh_history_list()
         self.display_chat()
@@ -241,6 +271,7 @@ class JugnuApp:
             return
         index = len(self.chats) - 1 - selection[0]
         if 0 <= index < len(self.chats):
+            self.tts.stop()
             self.current_id = self.chats[index]["id"]
             self.draft_chat = None
             self.display_chat()
@@ -252,6 +283,7 @@ class JugnuApp:
             return
         if not messagebox.askyesno("Clear Current Chat", "Is current chat ko history se permanently clear kar dein?"):
             return
+        self.tts.stop()
         self.chats = [saved for saved in self.chats if saved.get("id") != chat.get("id")]
         self.draft_chat = None
         self.make_draft()
@@ -343,6 +375,7 @@ class JugnuApp:
         user_text = self.input_box.get("1.0", "end").strip()
         if not user_text:
             return "break"
+        self.tts.stop()  # A new message interrupts any reply still being read aloud.
         chat = self.current_chat()
         if not chat:
             self.make_draft()
@@ -418,6 +451,8 @@ class JugnuApp:
         if chat and chat.get("id") == self.current_id:
             self.add_bubble("assistant", answer)
             self.canvas.yview_moveto(1.0)
+            if self.voice_enabled:
+                self.tts.speak(answer)
         self.busy = False
         self.send_btn.configure(state="normal")
         self.set_status("Ready")
@@ -426,9 +461,5 @@ class JugnuApp:
 if __name__ == "__main__":
     root = tk.Tk()
     app = JugnuApp(root)
+    root.protocol("WM_DELETE_WINDOW", app.on_close)
     root.mainloop()
-
-
-
-
-
