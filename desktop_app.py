@@ -55,6 +55,8 @@ class JugnuApp:
         self.voice_enabled = self.load_voice_setting()
         self.language = self.load_language_setting()
         self._status = ("status_ready", {})  # Remembered so the status line can be re-translated.
+        self.read_buttons = []  # "Read aloud" buttons currently on screen
+        self.stop_shown = False  # is the header Stop button visible?
         self.bubble_font = tkfont.Font(family="Segoe UI", size=10)
         self.char_w = max(self.bubble_font.measure("0"), 1)
         self.bubble_items = []
@@ -69,6 +71,7 @@ class JugnuApp:
         self.apply_language()
         self.apply_theme()
         self.root.after(250, self.warm_up)
+        self.poll_speech()
 
     def load_history(self):
         """Load valid, non-empty conversations from the history file."""
@@ -267,6 +270,9 @@ class JugnuApp:
         self.status = tk.Label(self.header, font=("Segoe UI", 9, "bold"),
                                anchor="e", padx=18)
         self.status.pack(side="right", fill="y")
+        # Shown only while speech is playing (see poll_speech); packed after status, so it sits left of it.
+        self.stop_btn = tk.Button(self.header, text="⏹  Stop", command=self.stop_speaking,
+                                  relief="flat", font=("Segoe UI", 9, "bold"), padx=12, pady=4)
 
         self.chat_area = tk.Frame(self.content)
         self.chat_area.pack(fill="both", expand=True, padx=12, pady=12)
@@ -379,6 +385,8 @@ class JugnuApp:
         self.history_label.configure(fg=c["muted"])
         self.header_title.configure(bg=c["accent"], fg="white")
         self.status.configure(bg=c["accent"], fg="#D1FAE5")
+        self.stop_btn.configure(bg=c["accent2"], fg="white", activebackground=c["danger"],
+                                activeforeground=c["accent2"], cursor="hand2")
         self.history_list.configure(bg=c["sidebar"], fg=c["text"],
                                     selectbackground=c["accent"], selectforeground="white")
         for btn in [self.new_btn, self.theme_btn, self.voice_btn, self.language_btn]:
@@ -406,6 +414,37 @@ class JugnuApp:
             self.tts.stop()  # Muting silences the current reply immediately.
         self.voice_btn.configure(text=self.voice_button_text())
         self.save_settings()
+
+    def stop_speaking(self):
+        self.tts.stop()
+        self.poll_speech(reschedule=False)  # hide the Stop button right away
+
+    def read_aloud(self, text):
+        # Reads exactly this message. Works even when the sidebar Voice toggle is off,
+        # because the user asked for it explicitly. Replaces anything already being read.
+        if not self.tts.available:
+            return
+        self.tts.stop()
+        self.tts.speak(text)
+        self.poll_speech(reschedule=False)
+
+    def poll_speech(self, reschedule=True):
+        # Keep the Stop button and the Read aloud buttons in step with the speech engine.
+        speaking = self.tts.speaking
+        if speaking and not self.stop_shown:
+            self.stop_btn.pack(side="right", padx=(0, 4))
+            self.stop_shown = True
+        elif not speaking and self.stop_shown:
+            self.stop_btn.pack_forget()
+            self.stop_shown = False
+        state = "normal" if self.tts.available else "disabled"
+        for btn in self.read_buttons:
+            try:
+                btn.configure(state=state)
+            except tk.TclError:
+                pass  # its bubble was already redrawn
+        if reschedule:
+            self.root.after(200, self.poll_speech)
 
     def on_close(self):
         if self._resize_timer:
@@ -504,6 +543,7 @@ class JugnuApp:
         self.display_chat()
 
     def display_chat(self):
+        self.read_buttons = []
         self.bubble_items.clear()
         for child in self.messages_frame.winfo_children():
             child.destroy()
@@ -581,6 +621,17 @@ class JugnuApp:
                             font=("Segoe UI", 9, "bold"), anchor="w")
         name_lbl.pack(side="left")
 
+        # Per-message Read aloud button (next to name/copy for assistant messages)
+        read_btn = None
+        if not is_user:
+            read_btn = tk.Button(header, text="🔊", command=lambda t=text: self.read_aloud(t),
+                                 relief="flat", bd=0, font=("Segoe UI Emoji", 10), cursor="hand2",
+                                 bg=bubble["bg"], fg=c["accent"], activebackground=bubble["bg"],
+                                 activeforeground=c["accent2"], disabledforeground=c["muted"],
+                                 state="normal" if self.tts.available else "disabled")
+            read_btn.pack(side="right", padx=(4, 0))
+            self.read_buttons.append(read_btn)
+
         copy_btn = tk.Button(header, text="⧉ Copy", font=("Segoe UI", 8, "bold"),
                              relief="flat", bd=0, highlightthickness=0,
                              bg=bubble["bg"], fg=c["muted"],
@@ -630,7 +681,7 @@ class JugnuApp:
         txt.pack(fill="x", padx=12, pady=(2, 10))
 
         # Forward mouse wheel events so scrolling over bubbles scrolls the canvas
-        for w in (row, bubble, header, name_lbl, copy_btn, txt):
+        for w in ([row, bubble, header, name_lbl, copy_btn, txt] + ([read_btn] if read_btn else [])):
             w.bind("<MouseWheel>", self.on_mousewheel)
             w.bind("<Button-4>", self.on_mousewheel)
             w.bind("<Button-5>", self.on_mousewheel)
