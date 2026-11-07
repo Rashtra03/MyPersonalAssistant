@@ -559,24 +559,20 @@ class JugnuApp:
         header.pack(fill="x", padx=12, pady=(8, 2))
 
         name = "You" if is_user else "🤖 JUGNU"
-        top = tk.Frame(bubble, bg=bubble["bg"])
-        top.pack(fill="x", padx=12, pady=(8, 1))
-        tk.Label(top, text=name, bg=bubble["bg"], fg=c["accent"],
-                 font=("Segoe UI", 9, "bold"), anchor="w").pack(side="left", fill="x", expand=True)
+        name_lbl = tk.Label(header, text=name, bg=bubble["bg"], fg=c["accent"],
+                            font=("Segoe UI", 9, "bold"), anchor="w")
+        name_lbl.pack(side="left")
+
+        # Per-message Read aloud button (next to name/copy for assistant messages)
+        read_btn = None
         if not is_user:
-            read_btn = tk.Button(top, text="🔊", command=lambda t=text: self.read_aloud(t),
+            read_btn = tk.Button(header, text="🔊", command=lambda t=text: self.read_aloud(t),
                                  relief="flat", bd=0, font=("Segoe UI Emoji", 10), cursor="hand2",
                                  bg=bubble["bg"], fg=c["accent"], activebackground=bubble["bg"],
                                  activeforeground=c["accent2"], disabledforeground=c["muted"],
                                  state="normal" if self.tts.available else "disabled")
-            read_btn.pack(side="right", padx=(12, 0))
+            read_btn.pack(side="right", padx=(4, 0))
             self.read_buttons.append(read_btn)
-        tk.Label(bubble, text=text, bg=bubble["bg"], fg=c["text"],
-                 font=("Segoe UI", 10), justify="left", anchor="w",
-                 wraplength=680).pack(fill="x", padx=12, pady=(1, 10))
-        name_lbl = tk.Label(header, text=name, bg=bubble["bg"], fg=c["accent"],
-                            font=("Segoe UI", 9, "bold"), anchor="w")
-        name_lbl.pack(side="left")
 
         copy_btn = tk.Button(header, text="⧉ Copy", font=("Segoe UI", 8, "bold"),
                              relief="flat", bd=0, highlightthickness=0,
@@ -627,7 +623,7 @@ class JugnuApp:
         txt.pack(fill="x", padx=12, pady=(2, 10))
 
         # Forward mouse wheel events so scrolling over bubbles scrolls the canvas
-        for w in (row, bubble, header, name_lbl, copy_btn, txt):
+        for w in ([row, bubble, header, name_lbl, copy_btn, txt] + ([read_btn] if read_btn else [])):
             w.bind("<MouseWheel>", self.on_mousewheel)
             w.bind("<Button-4>", self.on_mousewheel)
             w.bind("<Button-5>", self.on_mousewheel)
