@@ -4,6 +4,35 @@ import datetime
 import ast
 import operator
 
+def is_time_question(text):
+    q = text.lower().strip()
+
+    keys = [
+        "time", "date", "today", "day",
+        "abhi time", "samay", "tareekh", "aaj"
+    ]
+
+    question_phrases = [
+        "what time",
+        "time kya",
+        "date kya",
+        "tareekh kya",
+        "samay kya",
+        "aaj kya",
+        "aaj ki tareekh",
+        "abhi time",
+        "current date",
+        "current time",
+        "which day",
+        "what day",
+        "what is the date"
+    ]
+
+    return (
+        any(key in q for key in keys)
+        and any(phrase in q for phrase in question_phrases)
+    )
+
 # ---------------- CONFIGURATION ----------------
 
 MODEL = "llama3.2:3b"
