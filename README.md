@@ -76,6 +76,37 @@ Check out our [Open Issues](https://github.com/kismatkumari56/MyPersonalAssistan
 
 ---
 
+## 🧪 Running Tests
+
+JUGNU uses `pytest` for automated testing.
+
+### 1. Install development dependencies
+
+```bash
+pip install -r requirements-dev.txt
+```
+
+### 2. Run all tests
+
+```bash
+python -m pytest -v
+```
+
+### 3. Run a specific test file
+
+```bash
+python -m pytest tests/test_calculator.py -v
+```
+
+```bash
+python -m pytest tests/test_time_question.py -v
+```
+
+The test suite covers calculator operations, error handling, unsupported expressions, and time/date question detection.
+
+**Note:** Running the tests does not require launching the Tkinter desktop application or starting the Ollama server.
+
+
 ## 👩‍💻 Project Admin
 
 **Kismat Kumari** ([@kismatkumari56](https://github.com/kismatkumari56))
