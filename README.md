@@ -32,6 +32,7 @@ Contributors can earn points on the leaderboard based on merged PRs tagged with:
 - 📝 Persistent chat history
 - ➕ New Chat & Clear Current Chat options
 - 🌓 Dark and Light Mode support
+- 🌐 Interface and AI replies in English or Hinglish (switch with the Language button; add more in `strings.py`)
 - 🕒 Current Date and Time support
 - 🤖 Custom welcome screen with mascot
 
