@@ -38,6 +38,7 @@ class TTSManager:
         self.volume = volume
         self._queue = queue.Queue()
         self._generation = 0
+        self._pending = []  # generation of every item queued or being read, not yet finished
         self._lock = threading.Lock()
         self._engine = None
         if self.available:
@@ -50,7 +51,18 @@ class TTSManager:
             return
         text = clean_for_speech(text)
         if text:
-            self._queue.put((self._current_generation(), text))
+            with self._lock:
+                gen = self._generation
+                self._pending.append(gen)
+            self._queue.put((gen, text))
+
+    @property
+    def speaking(self):
+        """True while text is queued or being read. Turns False as soon as stop() is called."""
+        if not self.available:
+            return False
+        with self._lock:
+            return self._generation in self._pending
 
     def stop(self):
         """Interrupt current speech and drop anything still queued."""
@@ -60,9 +72,13 @@ class TTSManager:
             self._generation += 1
         while True:
             try:
-                self._queue.get_nowait()
+                item = self._queue.get_nowait()
             except queue.Empty:
                 break
+            if item is None:  # shutdown marker: keep it for the worker
+                self._queue.put(None)
+                break
+            self._finished(item[0])
 
     def shutdown(self):
         """Stop speaking and let the worker thread exit."""
@@ -74,6 +90,13 @@ class TTSManager:
     def _current_generation(self):
         with self._lock:
             return self._generation
+
+    def _finished(self, gen):
+        with self._lock:
+            try:
+                self._pending.remove(gen)
+            except ValueError:
+                pass
 
     def _worker(self):
         try:
@@ -116,3 +139,4 @@ class TTSManager:
                 except Exception:
                     break
             active["gen"] = None
+            self._finished(gen)
