@@ -1,37 +1,91 @@
+import ast
+import datetime
+import operator
+import re
 
 import requests
-import datetime
-import ast
-import operator
+
+# Optional conversational openers/closers so polite phrasing still triggers
+# local time/date replies without allowing unrelated sentences to match.
+_GREETING_PREFIX = (
+    r"(?:(?:hey|hi|hello|jugnu|ok|okay|please|pls|plz|sorry|wait|"
+    r"excuse\s+me|bhai|yaar|ji)[,:\s]+)*"
+)
+_ASK_PREFIX = (
+    r"(?:(?:can|could|would|will)\s+you\s+(?:please\s+)?)?"
+    r"(?:(?:tell|show|give)\s+me[,:\s]+|do\s+you\s+(?:know|have)[,:\s]+)?"
+)
+_POLITE_SUFFIX = (
+    r"(?:[,\s]+(?:please|pls|plz|right\s+now|now|today|abhi|bhai|yaar|ji|jugnu))*"
+)
+_TIME_OR_DATE_NOUN = (
+    r"(?:date\s+(?:and|&)\s+time|time\s+(?:and|&)\s+date|"
+    r"day\s+(?:and|&)\s+date|date\s+(?:and|&)\s+day|time|date)"
+)
+
+_TIME_QUESTION_PATTERNS = [
+    # Standalone short queries: "time", "date", "time please", "date?"
+    re.compile(
+        rf"^{_GREETING_PREFIX}\b(?:time|date)\b{_POLITE_SUFFIX}$",
+        re.IGNORECASE,
+    ),
+    # English current time, date, and day questions
+    re.compile(
+        rf"^{_GREETING_PREFIX}{_ASK_PREFIX}"
+        rf"(?:"
+        rf"\bwhat(?:'s|\s+is)\s+(?:the\s+)?(?:current\s+|local\s+|today(?:'s|s)?\s+)?{_TIME_OR_DATE_NOUN}\b|"
+        rf"\bwhat(?:'s|\s+is)\s+(?:the\s+)?day\s+today\b|"
+        rf"\bwhat\s+(?:the\s+)?(?:current\s+|local\s+|today(?:'s|s)?\s+)?{_TIME_OR_DATE_NOUN}\s+is\b|"
+        rf"\bwhat\s+(?:time|date)\s+(?:is\s+it|it\s+is)\b|"
+        rf"\bwhat\s+date\s+is\s+today\b|"
+        rf"\b(?:what|which)\s+day(?:\s+of\s+(?:the\s+)?week)?\s+"
+        rf"(?:is\s+(?:it|today)|(?:it|today)\s+is)\b|"
+        rf"\b(?:the\s+(?:current\s+|local\s+)?|current\s+|local\s+|today(?:'s|s)?\s+){_TIME_OR_DATE_NOUN}\b|"
+        rf"\b(?:the\s+)?(?:date\s+today|date\s+(?:and|&)\s+time|time\s+(?:and|&)\s+date)\b"
+        rf")"
+        rf"{_POLITE_SUFFIX}$",
+        re.IGNORECASE,
+    ),
+    # Hindi / Hinglish current time, date, and day questions
+    re.compile(
+        rf"^{_GREETING_PREFIX}"
+        rf"(?:"
+        rf"\babhi\s+(?:time|samay)\b|"
+        rf"\b(?:abhi\s+)?(?:time|samay)\s+"
+        rf"(?:kya(?:\s+(?:hai|hua(?:\s+hai)?|chal\s+raha(?:\s+hai)?))?|"
+        rf"kitna\s+(?:hua(?:\s+hai)?|baja(?:\s+hai)?)|hai\s+kya|bata(?:o|\s+do|na)?|bol(?:o)?)\b|"
+        rf"\b(?:abhi\s+)?kya\s+(?:time|samay)(?:\s+(?:hai|hua(?:\s+hai)?|ho\s+raha(?:\s+hai)?))?\b|"
+        rf"\b(?:abhi\s+)?kitna\s+(?:time|samay)\s+(?:hai|hua(?:\s+hai)?|ho\s+raha(?:\s+hai)?)\b|"
+        rf"\b(?:abhi\s+)?(?:kitne\s+baje(?:\s+(?:hain?|hai|hue(?:\s+hain?)?))?|kitna\s+baja(?:\s+hai)?)\b|"
+        rf"\baaj\s+(?:ki|ka)\s+(?:date|tareekh|tarikh)\b|"
+        rf"\b(?:aaj\s+(?:ki|ka)\s+|aaj\s+)?(?:date|tareekh|tarikh)\s+"
+        rf"(?:kya(?:\s+(?:hai|chal\s+rahi(?:\s+hai)?))?|hai\s+kya|bata(?:o|\s+do|na)?|bol(?:o)?)\b|"
+        rf"\b(?:aaj\s+(?:ki|ka)\s+|aaj\s+)?(?:kya|kaun\s*sa|konsa|kaun\s*si|konsi|kitni|kitna)\s+"
+        rf"(?:date|tareekh|tarikh)(?:\s+hai)?\b|"
+        rf"\baaj\s+(?:(?:ka\s+)?(?:din|day)\s+(?:kya\s+hai|kaun\s*sa\s+hai|konsa\s+hai|hai\s+kya)|"
+        rf"(?:kya|kaun\s*sa|konsa)\s+(?:din|day)(?:\s+hai)?)\b|"
+        rf"\b(?:kaun\s*sa|konsa)\s+(?:din|day)\s+hai\b|"
+        rf"\b(?:aaj\s+(?:ki|ka)\s+|abhi\s+)?(?:(?:date|tareekh|tarikh)\s+(?:aur|and|&)\s+(?:time|samay)|"
+        rf"(?:time|samay)\s+(?:aur|and|&)\s+(?:date|tareekh|tarikh))"
+        rf"(?:\s+(?:kya\s+(?:hai|hain)|bata(?:o|\s+do|na)?))?\b"
+        rf")"
+        rf"{_POLITE_SUFFIX}$",
+        re.IGNORECASE,
+    ),
+]
+
 
 def is_time_question(text):
-    q = text.lower().strip()
+    """Return True if *text* asks for the current local time, date, or day."""
+    if not isinstance(text, str):
+        return False
 
-    keys = [
-        "time", "date", "today", "day",
-        "abhi time", "samay", "tareekh", "aaj"
-    ]
+    q = re.sub(r"\s+", " ", text.strip().lower()).replace("\u2019", "'")
+    q = q.rstrip("?!.। ")
+    if not q:
+        return False
 
-    question_phrases = [
-        "what time",
-        "time kya",
-        "date kya",
-        "tareekh kya",
-        "samay kya",
-        "aaj kya",
-        "aaj ki tareekh",
-        "abhi time",
-        "current date",
-        "current time",
-        "which day",
-        "what day",
-        "what is the date"
-    ]
-
-    return (
-        any(key in q for key in keys)
-        and any(phrase in q for phrase in question_phrases)
-    )
+    return any(pattern.fullmatch(q) for pattern in _TIME_QUESTION_PATTERNS)
 
 # ---------------- CONFIGURATION ----------------
 
