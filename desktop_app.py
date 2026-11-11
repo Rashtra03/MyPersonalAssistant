@@ -147,6 +147,8 @@ class JugnuApp:
                     time_val = message.get("time")
                     if isinstance(time_val, str) and time_val.strip():
                         msg_dict["time"] = time_val.strip()
+                    if role == "assistant" and message.get("is_error") is True:
+                        msg_dict["is_error"] = True
 
                     valid_messages.append(msg_dict)
 
@@ -1190,6 +1192,7 @@ class JugnuApp:
 
     def ask_ollama(self, chat_id):
         language = self.language  # The prompt and any error text use the language chosen at send time.
+        is_error = True
         try:
             chat = next((c for c in self.chats if c.get("id") == chat_id), None)
             if not chat:
@@ -1197,7 +1200,10 @@ class JugnuApp:
                 self.root.after(0, lambda: self.finish_answer(None, chat_id))
                 return
             # Keep recent context only, to reduce prompt size and improve latency.
-            recent = chat.get("messages", [])[-10:]
+            recent = [
+                m for m in chat.get("messages", [])
+                if not (m["role"] == "assistant" and m.get("is_error") is True)
+            ][-10:]
             messages = [{
                 "role": "system",
                 "content": build_system_prompt(language, local_datetime_text())
@@ -1214,6 +1220,8 @@ class JugnuApp:
             answer = ollama_answer(response.json())
             if not answer:
                 answer = get_string(language, "error_empty_reply")
+            else:
+                is_error = False
         except InvalidOllamaResponse:
             answer = get_string(language, "error_invalid_response")
         except requests.Timeout:
@@ -1222,15 +1230,18 @@ class JugnuApp:
             answer = get_string(language, "error_connection")
         except (requests.RequestException, ValueError) as e:
             answer = get_string(language, "error_generic", error=e)
-        self.root.after(0, lambda: self.finish_answer(answer, chat_id))
+        self.root.after(0, lambda: self.finish_answer(answer, chat_id, is_error=is_error))
 
-    def finish_answer(self, answer, chat_id=None):
+    def finish_answer(self, answer, chat_id=None, is_error=False):
         chat = self.current_chat()
         if chat_id:
             chat = next((c for c in self.chats if c.get("id") == chat_id), None)
         time_now = message_time_text()
         if chat and isinstance(answer, str) and answer.strip():
-            chat["messages"].append({"role": "assistant", "content": answer, "time": time_now})
+            message = {"role": "assistant", "content": answer, "time": time_now}
+            if is_error:
+                message["is_error"] = True
+            chat["messages"].append(message)
             self.save_history()
         # Only display if the user is still viewing the chat that received the answer.
         if chat and chat.get("id") == self.current_id:
