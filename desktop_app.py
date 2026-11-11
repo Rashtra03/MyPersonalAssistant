@@ -364,8 +364,10 @@ class JugnuApp:
         self.canvas.configure(scrollregion=self.canvas.bbox("all"))
 
     def on_canvas_configure(self, event):
-        self.canvas_width = event.width
         self.canvas.itemconfigure(self.canvas_window, width=event.width)
+        if event.width == self.canvas_width:
+            return
+        self.canvas_width = event.width
         if self._resize_timer:
             try:
                 self.root.after_cancel(self._resize_timer)
@@ -373,19 +375,49 @@ class JugnuApp:
                 pass
         self._resize_timer = self.root.after(100, self.recalculate_bubbles)
 
+    def current_canvas_width(self, fallback=580):
+        """Return the active chat canvas width in pixels, or `fallback` before layout."""
+        width = getattr(self, "canvas_width", None)
+        if not width or width < 100:
+            measured = self.canvas.winfo_width()
+            width = measured if measured >= 100 else fallback
+        return width
+
+    def max_bubble_width_px(self, canvas_w):
+        """Compute maximum bubble text width from `canvas_w`, keeping bubbles inside viewport."""
+        # Reserve space for row padding (16), bubble side offset (40), text padding (24), and gutter.
+        available_px = max(40, canvas_w - 100)
+        return min(720, available_px, max(40, int(canvas_w * 0.72)))
+
+    def compute_bubble_cols(self, text, canvas_w):
+        """Compute tk.Text column width for `text` that wraps cleanly within `canvas_w`."""
+        max_bubble_px = self.max_bubble_width_px(canvas_w)
+        max_cols = max(1, max_bubble_px // self.char_w)
+        min_cols = min(18, max_cols)
+        lines = text.splitlines() or [""]
+        max_line_px = max(self.bubble_font.measure(line.expandtabs(8)) for line in lines)
+        needed_cols = max(1, math.ceil(max_line_px / self.char_w))
+        return max(min_cols, min(max_cols, needed_cols))
+
+    @staticmethod
+    def fit_bubble_height(txt, text):
+        """Return exact display-line height for a wrapped tk.Text bubble."""
+        dlines = txt.count("1.0", "end", "displaylines")
+        count = dlines[0] if isinstance(dlines, (tuple, list)) else (dlines or 0)
+        if count and text.endswith("\n"):
+            count -= 1
+        return max(1, count or 1)
+
     def recalculate_bubbles(self):
-        canvas_w = getattr(self, "canvas_width", None) or self.canvas.winfo_width()
+        self._resize_timer = None
+        canvas_w = self.current_canvas_width(fallback=0)
         if canvas_w < 100 or not self.bubble_items:
             return
-        max_bubble_px = min(720, max(280, canvas_w - 120))
-        max_cols = max(20, max_bubble_px // self.char_w)
 
         # Phase 1: Update widths so Tk wraps lines to the new dimension
-        for bubble, txt, orig_text in self.bubble_items:
+        for _bubble, txt, orig_text in self.bubble_items:
             try:
-                lines = orig_text.splitlines() or [""]
-                max_line_px = max(self.bubble_font.measure(l) for l in lines)
-                cols = max(18, min(max_cols, max(1, math.ceil(max_line_px / self.char_w))))
+                cols = self.compute_bubble_cols(orig_text, canvas_w)
                 txt.configure(state="normal", width=cols)
             except tk.TclError:
                 pass
@@ -394,10 +426,9 @@ class JugnuApp:
         self.root.update_idletasks()
 
         # Phase 2: Set exact height matching display line count
-        for bubble, txt, orig_text in self.bubble_items:
+        for _bubble, txt, orig_text in self.bubble_items:
             try:
-                dlines = txt.count("1.0", "end", "displaylines")
-                h = max(1, dlines[0] - 1 if (dlines and orig_text.endswith("\n")) else (dlines[0] if dlines else 1))
+                h = self.fit_bubble_height(txt, orig_text)
                 txt.configure(height=h, state="disabled")
             except tk.TclError:
                 pass
@@ -972,15 +1003,8 @@ class JugnuApp:
         copy_btn.bind("<Enter>", on_btn_enter)
         copy_btn.bind("<Leave>", on_btn_leave)
 
-        canvas_w = getattr(self, "canvas_width", None) or self.canvas.winfo_width()
-        if canvas_w < 200:
-            canvas_w = 700
-        max_bubble_px = min(720, max(280, canvas_w - 120))
-        max_cols = max(20, max_bubble_px // self.char_w)
-
-        lines = text.splitlines() or [""]
-        max_line_px = max(self.bubble_font.measure(l) for l in lines)
-        calc_cols = max(18, min(max_cols, max(1, math.ceil(max_line_px / self.char_w))))
+        canvas_w = self.current_canvas_width()
+        calc_cols = self.compute_bubble_cols(text, canvas_w)
 
         txt = tk.Text(bubble, font=self.bubble_font, wrap="word", width=calc_cols,
                       relief="flat", bd=0, highlightthickness=0,
@@ -1044,8 +1068,7 @@ class JugnuApp:
         txt.bind("<Button-2>", show_context_menu)
 
         self.root.update_idletasks()
-        dlines = txt.count("1.0", "end", "displaylines")
-        h = max(1, dlines[0] - 1 if (dlines and text.endswith("\n")) else (dlines[0] if dlines else 1))
+        h = self.fit_bubble_height(txt, text)
         txt.configure(height=h, state="disabled")
 
         self.bubble_items.append((bubble, txt, text))
