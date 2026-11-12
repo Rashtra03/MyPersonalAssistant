@@ -215,7 +215,13 @@ class JugnuApp:
     def load_settings(self):
         try:
             with open(SETTINGS_FILE, "r", encoding="utf-8") as f:
-                return bool(json.load(f).get("dark_mode", True))
+                data = json.load(f)
+
+            if not isinstance(data, dict):
+                return True
+
+            return bool(data.get("dark_mode", True))
+
         except (FileNotFoundError, json.JSONDecodeError, OSError):
             return True
 
