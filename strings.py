@@ -55,6 +55,8 @@ STRINGS = {
         "rename_cancel_btn": "Cancel",
         "delete_chat_title": "Delete Chat",
         "delete_chat_message": "Permanently delete “{title}”? This cannot be undone.",
+        "code_copy_btn": "⧉ Copy code",
+        "code_copied_btn": "✓ Copied!",
         # Replies shown when something goes wrong
         "error_empty_reply": "Sorry, I got an empty response. Please try again.",
         "error_invalid_response": "Ollama returned an invalid response. Please try again.",
@@ -111,6 +113,8 @@ STRINGS = {
         "rename_cancel_btn": "Cancel",
         "delete_chat_title": "Chat Delete Karo",
         "delete_chat_message": "“{title}” ko permanently delete kar dein? Ye wapas nahi aayegi.",
+        "code_copy_btn": "⧉ Code copy karo",
+        "code_copied_btn": "✓ Copy ho gaya!",
         # Replies shown when something goes wrong
         "error_empty_reply": "Sorry, mujhe empty response mila. Ek baar phir try karo.",
         "error_invalid_response": "Ollama se sahi jawab nahi mila. Ek baar phir try karo.",

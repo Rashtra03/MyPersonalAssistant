@@ -16,6 +16,7 @@ from strings import build_system_prompt, get_string, next_language, normalize_la
 from tts import TTSManager, DEFAULT_RATE, DEFAULT_VOLUME, RATE_MIN, RATE_MAX, clamp
 from assistant import calculate, is_time_question as detect_time_question
 from history_lock import HistoryInUseError, HistoryLock
+from markdown_render import render_markdown, plain_text
 
 APP_TITLE = "JUGNU | Just an Unusually Genius Neural Utility"
 OLLAMA_URL = "http://localhost:11434/api/chat"
@@ -24,6 +25,8 @@ HISTORY_FILE = "jugnu_history.json"
 SETTINGS_FILE = "jugnu_settings.json"
 MAX_LIST_TITLE = 34    # longer chat titles are shortened with "…" in the sidebar list
 MAX_TITLE_LENGTH = 60  # longest title a user can give a chat
+# Markdown styles that indent their lines; bubbles get a few extra columns so those lines do not wrap early.
+INDENT_TAGS = ("code", "codehead", "quote") + tuple("li%d" % n for n in range(5))
 
 
 class InvalidOllamaResponse(ValueError):
@@ -45,13 +48,15 @@ LIGHT = {
     "bg": "#F7F4FF", "sidebar": "#EEE8FF", "panel": "#FFFFFF",
     "text": "#27213B", "muted": "#756B91", "accent": "#8B5CF6",
     "accent2": "#EC4899", "user": "#E3DCFF", "assistant": "#F0EAFB",
-    "entry": "#FFFFFF", "border": "#D9CFF5", "danger": "#FCE7F3"
+    "entry": "#FFFFFF", "border": "#D9CFF5", "danger": "#FCE7F3",
+    "code": "#FFFFFF", "inline_code": "#E2D9F7"
 }
 DARK = {
     "bg": "#191728", "sidebar": "#211D35", "panel": "#28223D",
     "text": "#F4EEFF", "muted": "#B7A9D8", "accent": "#8B6CF0",
     "accent2": "#D946A6", "user": "#34365A", "assistant": "#2A2440",
-    "entry": "#2A2440", "border": "#463A66", "danger": "#4B2A40"
+    "entry": "#2A2440", "border": "#463A66", "danger": "#4B2A40",
+    "code": "#17142A", "inline_code": "#3A3157"
 }
 
 def local_datetime_text():
@@ -405,7 +410,32 @@ class JugnuApp:
         count = dlines[0] if isinstance(dlines, (tuple, list)) else (dlines or 0)
         if count and text.endswith("\n"):
             count -= 1
-        return max(1, count or 1)
+        count = max(1, count or 1)
+        # Markdown headings, code blocks and Copy buttons are taller than a normal line,
+        # so a count of lines is not enough: also ask Tk for the real height in pixels.
+        try:
+            pixels = txt.count("1.0", "end", "ypixels")
+            pixels = pixels[0] if isinstance(pixels, (tuple, list)) else (pixels or 0)
+            line = tkfont.nametofont(txt.cget("font"), root=txt).metrics("linespace")
+            lines_by_pixels = math.ceil(pixels / line) if line else 0
+            if text.endswith("\n"):
+                lines_by_pixels -= 1
+            count = max(count, lines_by_pixels)
+        except (tk.TclError, TypeError, ValueError):
+            pass
+        return count
+
+    def bubble_cols(self, txt, measure_text, canvas_w):
+        """Column width for a bubble: compute_bubble_cols plus room for indented Markdown lines."""
+        cols = self.compute_bubble_cols(measure_text, canvas_w)
+        try:
+            indented = any(txt.tag_ranges(name) for name in INDENT_TAGS)
+        except tk.TclError:
+            indented = False
+        if indented:
+            max_cols = max(1, self.max_bubble_width_px(canvas_w) // self.char_w)
+            cols = min(max_cols, cols + 3)
+        return cols
 
     def recalculate_bubbles(self):
         self._resize_timer = None
@@ -416,7 +446,7 @@ class JugnuApp:
         # Phase 1: Update widths so Tk wraps lines to the new dimension
         for _bubble, txt, orig_text in self.bubble_items:
             try:
-                cols = self.compute_bubble_cols(orig_text, canvas_w)
+                cols = self.bubble_cols(txt, orig_text, canvas_w)
                 txt.configure(state="normal", width=cols)
             except tk.TclError:
                 pass
@@ -515,7 +545,7 @@ class JugnuApp:
         if not self.tts.available:
             return
         self.tts.stop()
-        self.tts.speak(text)
+        self.tts.speak(plain_text(text))  # without ** # ` and other Markdown symbols
         self.poll_speech(reschedule=False)
 
     def poll_speech(self, reschedule=True):
@@ -940,6 +970,121 @@ class JugnuApp:
         except Exception:
             pass
 
+    # ---------- Markdown in assistant bubbles ----------
+    def markdown_fonts(self):
+        """Fonts for the Markdown styles. Built once and kept, because Tk drops unreferenced fonts."""
+        fonts = getattr(self, "_markdown_fonts", None)
+        if fonts is None:
+            family, size = self.bubble_font.cget("family"), self.bubble_font.cget("size")
+            installed = set(tkfont.families(self.root))
+            mono = next((name for name in ("Consolas", "Cascadia Mono", "Menlo", "DejaVu Sans Mono",
+                                           "Courier New") if name in installed),
+                        tkfont.nametofont("TkFixedFont", root=self.root).actual("family"))
+
+            def make(**options):
+                return tkfont.Font(root=self.root, **options)
+
+            fonts = self._markdown_fonts = {
+                "bold": make(family=family, size=size, weight="bold"),
+                "italic": make(family=family, size=size, slant="italic"),
+                "bolditalic": make(family=family, size=size, weight="bold", slant="italic"),
+                "h1": make(family=family, size=size + 4, weight="bold"),
+                "h2": make(family=family, size=size + 2, weight="bold"),
+                "h3": make(family=family, size=size + 1, weight="bold"),
+                "mono": make(family=mono, size=size),
+                "codehead": make(family=family, size=size - 1, weight="bold"),
+            }
+        return fonts
+
+    def configure_markdown_tags(self, txt):
+        """Give a bubble's tk.Text the look of each Markdown style, in the current theme."""
+        c, f = self.colors, self.markdown_fonts()
+        # Tags created later win over earlier ones, so inline code and code blocks come last.
+        txt.tag_configure("bold", font=f["bold"])
+        txt.tag_configure("italic", font=f["italic"])
+        txt.tag_configure("bolditalic", font=f["bolditalic"])
+        txt.tag_configure("strike", overstrike=True)
+        txt.tag_configure("h1", font=f["h1"], foreground=c["accent"], spacing1=4, spacing3=2)
+        txt.tag_configure("h2", font=f["h2"], foreground=c["accent"], spacing1=4, spacing3=2)
+        txt.tag_configure("h3", font=f["h3"], foreground=c["accent"], spacing1=2, spacing3=1)
+        txt.tag_configure("quote", foreground=c["muted"], lmargin1=4, lmargin2=16)
+        for level in range(5):
+            indent = 4 + level * 18
+            txt.tag_configure("li%d" % level, lmargin1=indent, lmargin2=indent + 14)
+        txt.tag_configure("rule", foreground=c["border"])
+        txt.tag_configure("link", foreground=c["accent"], underline=True)
+        txt.tag_configure("linkurl", foreground=c["muted"])
+        txt.tag_configure("icode", font=f["mono"], background=c["inline_code"])
+        txt.tag_configure("codehead", background=c["code"], foreground=c["muted"], font=f["codehead"],
+                          lmargin1=10, lmargin2=10, spacing1=2)
+        txt.tag_configure("code", background=c["code"], foreground=c["text"], font=f["mono"],
+                          lmargin1=10, lmargin2=10, rmargin=10, wrap="char")
+
+    def make_code_copy_button(self, txt, code):
+        """The Copy button shown at the top of a code block; it copies exactly that code."""
+        c = self.colors
+        button = tk.Button(txt, text=self.t("code_copy_btn"), font=("Segoe UI", 8, "bold"),
+                           relief="flat", bd=0, highlightthickness=0, bg=c["code"], fg=c["muted"],
+                           activebackground=c["border"], activeforeground=c["accent"],
+                           cursor="hand2", padx=6, pady=1)
+        button.configure(command=lambda: self.copy_code(code, button))
+        button.bind("<Enter>", lambda _e: button.configure(fg=c["accent"]))
+        button.bind("<Leave>", lambda _e: button.configure(fg=c["muted"]))
+        return button
+
+    def copy_code(self, code, button):
+        try:
+            self.root.clipboard_clear()
+            self.root.clipboard_append(code)
+            self.root.update()
+            button.configure(text=self.t("code_copied_btn"),
+                             fg="#10B981" if self.dark_mode else "#059669")
+
+            def revert():
+                try:
+                    button.configure(text=self.t("code_copy_btn"), fg=self.colors["muted"])
+                except tk.TclError:
+                    pass  # the bubble was redrawn meanwhile
+            self.root.after(1500, revert)
+        except tk.TclError:
+            pass
+
+    @staticmethod
+    def measure_text(segments):
+        """Text used to size the bubble. Code is monospace, so each code character counts as one column."""
+        parts = []
+        for seg in segments:
+            if seg.copy is not None:
+                continue
+            if "code" in seg.tags:
+                parts.append("\n".join("0" * len(line.expandtabs(4)) for line in seg.text.split("\n")))
+            else:
+                parts.append(seg.text)
+        return "".join(parts)
+
+    def fill_bubble_text(self, txt, text, segments):
+        """Put the message into `txt`, styled. Returns (text used for sizing, embedded buttons).
+
+        If anything goes wrong while styling, the bubble shows the plain message instead.
+        """
+        buttons = []
+        try:
+            self.configure_markdown_tags(txt)
+            for seg in segments:
+                if seg.copy is not None:
+                    button = self.make_code_copy_button(txt, seg.copy)
+                    txt.window_create("end", window=button, padx=6)
+                    buttons.append(button)
+                else:
+                    txt.insert("end", seg.text, seg.tags)
+            return self.measure_text(segments), buttons
+        except Exception:
+            for button in buttons:
+                button.destroy()
+            txt.delete("1.0", "end")
+            txt.insert("1.0", text)
+            return text, []
+
     def add_bubble(self, role, text, timestamp=None):
         c = self.colors
         is_user = role == "user"
@@ -1003,14 +1148,22 @@ class JugnuApp:
         copy_btn.bind("<Leave>", on_btn_leave)
 
         canvas_w = self.current_canvas_width()
-        calc_cols = self.compute_bubble_cols(text, canvas_w)
+        # Assistant replies are Markdown; what you type yourself is always shown exactly as typed.
+        segments = None if is_user else render_markdown(text)
+        measure_text = text if segments is None else self.measure_text(segments)
+        calc_cols = self.compute_bubble_cols(measure_text, canvas_w)
 
         txt = tk.Text(bubble, font=self.bubble_font, wrap="word", width=calc_cols,
                       relief="flat", bd=0, highlightthickness=0,
                       bg=bubble["bg"], fg=c["text"],
                       selectbackground=c["accent"], selectforeground="white",
                       inactiveselectbackground=c["accent"], cursor="xterm")
-        txt.insert("1.0", text)
+        embedded_buttons = []
+        if segments is None:
+            txt.insert("1.0", text)
+        else:
+            measure_text, embedded_buttons = self.fill_bubble_text(txt, text, segments)
+            txt.configure(width=self.bubble_cols(txt, measure_text, canvas_w))
         txt.pack(fill="x", padx=12, pady=(2, 10))
 
         # Forward mouse wheel events so scrolling over bubbles scrolls the canvas
@@ -1019,6 +1172,7 @@ class JugnuApp:
             widgets_to_bind.append(read_btn)
         if time_lbl:
             widgets_to_bind.append(time_lbl)
+        widgets_to_bind.extend(embedded_buttons)
         for w in widgets_to_bind:
             w.bind("<MouseWheel>", self.on_mousewheel)
             w.bind("<Button-4>", self.on_mousewheel)
@@ -1067,10 +1221,10 @@ class JugnuApp:
         txt.bind("<Button-2>", show_context_menu)
 
         self.root.update_idletasks()
-        h = self.fit_bubble_height(txt, text)
+        h = self.fit_bubble_height(txt, measure_text)
         txt.configure(height=h, state="disabled")
 
-        self.bubble_items.append((bubble, txt, text))
+        self.bubble_items.append((bubble, txt, measure_text))
 
     def set_status(self, key, **kwargs):
         # Store the key (not the text) so a language switch can re-translate the status line.
@@ -1248,7 +1402,7 @@ class JugnuApp:
             self.add_bubble("assistant", answer, timestamp=time_now)
             self.canvas.yview_moveto(1.0)
             if self.voice_enabled:
-                self.tts.speak(answer)
+                self.tts.speak(plain_text(answer))
         self.busy = False
         self.send_btn.configure(state="normal")
         self.set_status("status_ready")
