@@ -1,7 +1,9 @@
 import ast
 import datetime
+import json
 import operator
 import re
+import sys
 
 import requests
 
@@ -201,7 +203,7 @@ def calculate(expression):
 
 # ---------------- AI CHAT ----------------
 
-def ask_ai(user_message):
+def ask_ai(user_message, stream=True):
     try:
         response = requests.post(
             OLLAMA_URL,
@@ -217,32 +219,73 @@ def ask_ai(user_message):
                         "content": user_message
                     }
                 ],
-                "stream": False
+                "stream": stream
             },
+            stream=stream,
             timeout=120
         )
 
         response.raise_for_status()
 
+        if stream:
+            collected = []
+            lines = (
+                response.iter_lines()
+                if getattr(response, "raw", None) is not None
+                else (response._content.splitlines() if getattr(response, "_content", None) else [])
+            )
+            for line in lines:
+                if not line:
+                    continue
+                try:
+                    raw_str = (
+                        line.decode("utf-8").strip()
+                        if isinstance(line, (bytes, bytearray))
+                        else str(line).strip()
+                    )
+                    if not raw_str:
+                        continue
+                    data = json.loads(raw_str)
+                    content = data.get("message", {}).get("content", "")
+                    if content:
+                        sys.stdout.write(content)
+                        sys.stdout.flush()
+                        collected.append(content)
+                    if data.get("done", False):
+                        break
+                except (json.JSONDecodeError, AttributeError):
+                    continue
+            if collected:
+                print()
+            return "".join(collected).strip()
+
         data = response.json()
         answer = data["message"]["content"]
-
         return answer.strip()
 
     except requests.exceptions.ConnectionError:
-        return (
+        msg = (
             "I cannot connect to Ollama. "
             "Please make sure Ollama is running."
         )
+        if stream:
+            print(msg)
+        return msg
 
     except requests.exceptions.Timeout:
-        return (
+        msg = (
             "The AI is taking too long to respond. "
             "Please try again."
         )
+        if stream:
+            print(msg)
+        return msg
 
     except Exception as error:
-        return f"An error occurred: {error}"
+        msg = f"An error occurred: {error}"
+        if stream:
+            print(msg)
+        return msg
 
 
 # ---------------- HELP ----------------
@@ -294,9 +337,8 @@ def run_assistant():
 
         # General AI question
         else:
-            print("\nAssistant: Thinking...")
-            answer = ask_ai(user_input)
-            print("\nAssistant:", answer)
+            print("\nAssistant: ", end="", flush=True)
+            ask_ai(user_input, stream=True)
 
 
 # ---------------- START ----------------
