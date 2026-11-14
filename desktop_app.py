@@ -2,25 +2,25 @@ import tkinter as tk
 from tkinter import messagebox
 from tkinter import font as tkfont
 import math
-from datetime import datetime
 import json
 import threading
-import requests
 import uuid
 import os
+import sys
 import tempfile
 import ast
 import re
 
+from core import (
+    ERROR_CONNECTION, ERROR_INVALID, ERROR_TIMEOUT, build_messages, calculate,
+    chat as ollama_chat, is_time_question as detect_time_question, local_datetime_text, local_now,
+)
 from strings import build_system_prompt, get_string, next_language, normalize_language
 from tts import TTSManager, DEFAULT_RATE, DEFAULT_VOLUME, RATE_MIN, RATE_MAX, clamp
-from assistant import calculate, is_time_question as detect_time_question
 from history_lock import HistoryInUseError, HistoryLock
 from markdown_render import render_markdown, plain_text
 
 APP_TITLE = "JUGNU | Just an Unusually Genius Neural Utility"
-OLLAMA_URL = "http://localhost:11434/api/chat"
-MODEL = "llama3.2:3b"
 HISTORY_FILE = "jugnu_history.json"
 SETTINGS_FILE = "jugnu_settings.json"
 MAX_LIST_TITLE = 34    # longer chat titles are shortened with "…" in the sidebar list
@@ -28,21 +28,6 @@ MAX_TITLE_LENGTH = 60  # longest title a user can give a chat
 # Markdown styles that indent their lines; bubbles get a few extra columns so those lines do not wrap early.
 INDENT_TAGS = ("code", "codehead", "quote") + tuple("li%d" % n for n in range(5))
 
-
-class InvalidOllamaResponse(ValueError):
-    """The decoded response does not contain a usable chat message."""
-
-
-def ollama_answer(data):
-    if not isinstance(data, dict):
-        raise InvalidOllamaResponse()
-    message = data.get("message")
-    if not isinstance(message, dict):
-        raise InvalidOllamaResponse()
-    content = message.get("content")
-    if not isinstance(content, str):
-        raise InvalidOllamaResponse()
-    return content.strip()
 
 LIGHT = {
     "bg": "#F7F4FF", "sidebar": "#EEE8FF", "panel": "#FFFFFF",
@@ -59,13 +44,74 @@ DARK = {
     "code": "#17142A", "inline_code": "#3A3157"
 }
 
-def local_datetime_text():
-    # Uses the Windows system's configured local timezone.
-    now = datetime.now().astimezone()
-    return now.strftime("%A, %d %B %Y, %I:%M:%S %p %Z")
-
 def message_time_text():
-    return datetime.now().astimezone().strftime("%I:%M %p")
+    return local_now().strftime("%I:%M %p")
+
+
+class FlatButton(tk.Label):
+    """A tk.Label that behaves like a tk.Button.
+
+    On macOS, Tk draws tk.Button with the native Aqua style and ignores bg and
+    activebackground, so themed buttons (white text) become unreadable. A Label
+    respects every colour option, so it is used as the button there instead.
+    It accepts the same options as tk.Button, including command and state.
+    """
+
+    def __init__(self, master=None, command=None, **kwargs):
+        super().__init__(master, **kwargs)
+        self._command = command
+        self._pressed = False
+        # Class-level bindings live in their own bindtag, so a widget's own
+        # bind("<Enter>", ...) (like the Copy button's hover) does not replace them.
+        self.bindtags((self.bindtags()[0], "FlatButton") + self.bindtags()[1:])
+        if not self.bind_class("FlatButton"):
+            self.bind_class("FlatButton", "<Enter>", FlatButton._on_enter)
+            self.bind_class("FlatButton", "<Leave>", FlatButton._on_leave)
+            self.bind_class("FlatButton", "<ButtonPress-1>", FlatButton._on_press)
+            self.bind_class("FlatButton", "<ButtonRelease-1>", FlatButton._on_release)
+
+    def configure(self, cnf=None, **kwargs):
+        if "command" in kwargs:
+            self._command = kwargs.pop("command")
+        if cnf is None and not kwargs:
+            return super().configure()
+        return super().configure(cnf, **kwargs)
+
+    config = configure
+
+    def invoke(self):
+        if str(self["state"]) != "disabled" and self._command:
+            return self._command()
+
+    @staticmethod
+    def _on_enter(event):
+        widget = event.widget
+        if str(widget["state"]) != "disabled":
+            widget.configure(state="active")  # shows activebackground / activeforeground
+
+    @staticmethod
+    def _on_leave(event):
+        widget = event.widget
+        widget._pressed = False
+        if str(widget["state"]) != "disabled":
+            widget.configure(state="normal")
+
+    @staticmethod
+    def _on_press(event):
+        event.widget._pressed = str(event.widget["state"]) != "disabled"
+
+    @staticmethod
+    def _on_release(event):
+        widget = event.widget
+        inside = 0 <= event.x < widget.winfo_width() and 0 <= event.y < widget.winfo_height()
+        if widget._pressed and inside:
+            widget._pressed = False
+            widget.invoke()
+        widget._pressed = False
+
+
+# tk.Button keeps the native look elsewhere; on macOS it ignores the theme colours.
+Button = FlatButton if sys.platform == "darwin" else tk.Button
 
 class JugnuApp:
     def __init__(self, root):
@@ -222,7 +268,13 @@ class JugnuApp:
     def load_settings(self):
         try:
             with open(SETTINGS_FILE, "r", encoding="utf-8") as f:
-                return bool(json.load(f).get("dark_mode", True))
+                data = json.load(f)
+
+            if not isinstance(data, dict):
+                return True
+
+            return bool(data.get("dark_mode", True))
+
         except (FileNotFoundError, json.JSONDecodeError, OSError):
             return True
 
@@ -286,7 +338,7 @@ class JugnuApp:
                                 font=("Segoe UI", 9), justify="left", anchor="w", padx=20)
         self.tagline.pack(fill="x", pady=(0, 18))
 
-        self.new_btn = tk.Button(self.sidebar, command=self.new_chat,
+        self.new_btn = Button(self.sidebar, command=self.new_chat,
                                  font=("Segoe UI", 10, "bold"), relief="flat", pady=12)
         self.new_btn.pack(fill="x", padx=12, pady=(0, 18))
 
@@ -301,23 +353,23 @@ class JugnuApp:
         self.history_list.bind("<Button-3>", self.show_chat_menu)  # right-click (Windows / Linux)
         self.history_list.bind("<Button-2>", self.show_chat_menu)  # right-click (macOS)
 
-        self.clear_btn = tk.Button(self.sidebar, command=self.clear_chat,
+        self.clear_btn = Button(self.sidebar, command=self.clear_chat,
                                    relief="flat", pady=10)
         self.clear_btn.pack(fill="x", padx=12, pady=(4, 8))
-        self.voice_btn = tk.Button(self.sidebar, command=self.toggle_voice,
+        self.voice_btn = Button(self.sidebar, command=self.toggle_voice,
                                    relief="flat", pady=10)
         self.voice_btn.pack(fill="x", padx=12, pady=(0, 8))
         if not self.tts.available:
             self.voice_btn.configure(state="disabled")  # pyttsx3 not installed
-        self.voice_settings_btn = tk.Button(self.sidebar, command=self.open_voice_settings,
+        self.voice_settings_btn = Button(self.sidebar, command=self.open_voice_settings,
                                             relief="flat", pady=10)
         self.voice_settings_btn.pack(fill="x", padx=12, pady=(0, 8))
         if not self.tts.available:
             self.voice_settings_btn.configure(state="disabled")
-        self.language_btn = tk.Button(self.sidebar, command=self.toggle_language,
+        self.language_btn = Button(self.sidebar, command=self.toggle_language,
                                       relief="flat", pady=10)
         self.language_btn.pack(fill="x", padx=12, pady=(0, 8))
-        self.theme_btn = tk.Button(self.sidebar, command=self.toggle_theme,
+        self.theme_btn = Button(self.sidebar, command=self.toggle_theme,
                                    relief="flat", pady=10)
         self.theme_btn.pack(fill="x", padx=12, pady=(0, 12))
 
@@ -334,7 +386,7 @@ class JugnuApp:
                                anchor="e", padx=18)
         self.status.pack(side="right", fill="y")
         # Shown only while speech is playing (see poll_speech); packed after status, so it sits left of it.
-        self.stop_btn = tk.Button(self.header, text="⏹  Stop", command=self.stop_speaking,
+        self.stop_btn = Button(self.header, text="⏹  Stop", command=self.stop_speaking,
                                   relief="flat", font=("Segoe UI", 9, "bold"), padx=12, pady=4)
 
         self.chat_area = tk.Frame(self.content)
@@ -360,7 +412,7 @@ class JugnuApp:
         self.input_box.bind("<Control-Return>", self.send_message)
         self.input_box.bind("<Return>", self.send_message)
         self.input_box.bind("<Shift-Return>", lambda event: None)
-        self.send_btn = tk.Button(self.bottom, command=self.send_message,
+        self.send_btn = Button(self.bottom, command=self.send_message,
                                   relief="flat", font=("Segoe UI", 10, "bold"), padx=18, pady=12)
         self.send_btn.pack(side="right")
 
@@ -602,9 +654,9 @@ class JugnuApp:
                                showvalue=False, length=300, highlightthickness=0, bd=0)
         w["voice_label"] = tk.Label(win, font=("Segoe UI", 10, "bold"), anchor="w")
         w["voice"] = tk.OptionMenu(win, self.voice_choice, *labels, command=self.on_voice_pick)
-        w["test"] = tk.Button(win, command=self.test_voice, relief="flat",
+        w["test"] = Button(win, command=self.test_voice, relief="flat",
                               font=("Segoe UI", 10, "bold"), pady=8)
-        w["close"] = tk.Button(win, command=self.close_voice_settings, relief="flat", pady=8)
+        w["close"] = Button(win, command=self.close_voice_settings, relief="flat", pady=8)
         # Set the starting positions first, then attach the callbacks, so opening the
         # window never rewrites the saved values.
         w["rate"].set(self.voice_rate)
@@ -872,10 +924,10 @@ class JugnuApp:
 
         buttons = tk.Frame(win, bg=c["bg"])
         buttons.pack(fill="x", padx=20, pady=(0, 16))
-        tk.Button(buttons, text=self.t("rename_save_btn"), command=accept, relief="flat",
+        Button(buttons, text=self.t("rename_save_btn"), command=accept, relief="flat",
                   bg=c["accent"], fg="white", activebackground=c["accent2"],
                   activeforeground="white", cursor="hand2", padx=16, pady=6).pack(side="right")
-        tk.Button(buttons, text=self.t("rename_cancel_btn"), command=cancel, relief="flat",
+        Button(buttons, text=self.t("rename_cancel_btn"), command=cancel, relief="flat",
                   bg=c["danger"], fg=c["accent2"], activebackground=c["danger"],
                   activeforeground=c["text"], cursor="hand2", padx=16, pady=6).pack(side="right", padx=(0, 8))
         entry.bind("<Return>", accept)
@@ -1109,7 +1161,7 @@ class JugnuApp:
         # Per-message Read aloud button (next to name/copy for assistant messages)
         read_btn = None
         if not is_user:
-            read_btn = tk.Button(header, text="🔊", command=lambda t=text: self.read_aloud(t),
+            read_btn = Button(header, text="🔊", command=lambda t=text: self.read_aloud(t),
                                  relief="flat", bd=0, font=("Segoe UI Emoji", 10), cursor="hand2",
                                  bg=bubble["bg"], fg=c["accent"], activebackground=bubble["bg"],
                                  activeforeground=c["accent2"], disabledforeground=c["muted"],
@@ -1117,7 +1169,7 @@ class JugnuApp:
             read_btn.pack(side="right", padx=(4, 0))
             self.read_buttons.append(read_btn)
 
-        copy_btn = tk.Button(header, text="⧉ Copy", font=("Segoe UI", 8, "bold"),
+        copy_btn = Button(header, text="⧉ Copy", font=("Segoe UI", 8, "bold"),
                              relief="flat", bd=0, highlightthickness=0,
                              bg=bubble["bg"], fg=c["muted"],
                              highlightbackground=bubble["bg"],
@@ -1233,15 +1285,13 @@ class JugnuApp:
 
     def warm_up(self):
         def task():
-            try:
-                requests.post(OLLAMA_URL, json={
-                    "model": MODEL, "messages": [{"role": "user", "content": "Reply with OK."}],
-                    "stream": False, "keep_alive": "10m",
-                    "options": {"num_predict": 3}
-                }, timeout=90)
-                self.root.after(0, lambda: self.set_status("status_ready"))
-            except requests.RequestException:
+            result = ollama_chat([{"role": "user", "content": "Reply with OK."}],
+                                 timeout=90, keep_alive="10m", options={"num_predict": 3})
+            # Only "cannot reach Ollama" counts as offline; any reply at all means it is running.
+            if result.error in (ERROR_CONNECTION, ERROR_TIMEOUT):
                 self.root.after(0, lambda: self.set_status("status_offline"))
+            else:
+                self.root.after(0, lambda: self.set_status("status_ready"))
         threading.Thread(target=task, daemon=True).start()
 
     def is_time_question(self, text):
@@ -1346,44 +1396,30 @@ class JugnuApp:
 
     def ask_ollama(self, chat_id):
         language = self.language  # The prompt and any error text use the language chosen at send time.
+        saved_chat = next((c for c in self.chats if c.get("id") == chat_id), None)
+        if not saved_chat:
+            # The conversation may have been cleared while the request was running.
+            self.root.after(0, lambda: self.finish_answer(None, chat_id))
+            return
+        messages = build_messages(build_system_prompt(language, local_datetime_text()),
+                                  saved_chat.get("messages", []))
+        # The request itself is shared with the command-line version (core.py); the wording
+        # of each failure below is this window's own, so it can be translated.
+        result = ollama_chat(messages, timeout=180, keep_alive="10m",
+                             options={"num_predict": 256, "temperature": 0.6})
         is_error = True
-        try:
-            chat = next((c for c in self.chats if c.get("id") == chat_id), None)
-            if not chat:
-                # The conversation may have been cleared while the request was running.
-                self.root.after(0, lambda: self.finish_answer(None, chat_id))
-                return
-            # Keep recent context only, to reduce prompt size and improve latency.
-            recent = [
-                m for m in chat.get("messages", [])
-                if not (m["role"] == "assistant" and m.get("is_error") is True)
-            ][-10:]
-            messages = [{
-                "role": "system",
-                "content": build_system_prompt(language, local_datetime_text())
-            }]
-            messages.extend({"role": m["role"], "content": m["content"]} for m in recent)
-            response = requests.post(OLLAMA_URL, json={
-                "model": MODEL,
-                "messages": messages,
-                "stream": False,
-                "keep_alive": "10m",
-                "options": {"num_predict": 256, "temperature": 0.6}
-            }, timeout=180)
-            response.raise_for_status()
-            answer = ollama_answer(response.json())
-            if not answer:
-                answer = get_string(language, "error_empty_reply")
-            else:
-                is_error = False
-        except InvalidOllamaResponse:
+        if result.ok and result.answer:
+            answer, is_error = result.answer, False
+        elif result.ok:
+            answer = get_string(language, "error_empty_reply")
+        elif result.error == ERROR_INVALID:
             answer = get_string(language, "error_invalid_response")
-        except requests.Timeout:
+        elif result.error == ERROR_TIMEOUT:
             answer = get_string(language, "error_timeout")
-        except requests.ConnectionError:
+        elif result.error == ERROR_CONNECTION:
             answer = get_string(language, "error_connection")
-        except (requests.RequestException, ValueError) as e:
-            answer = get_string(language, "error_generic", error=e)
+        else:
+            answer = get_string(language, "error_generic", error=result.detail)
         self.root.after(0, lambda: self.finish_answer(answer, chat_id, is_error=is_error))
 
     def finish_answer(self, answer, chat_id=None, is_error=False):
