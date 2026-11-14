@@ -29,6 +29,50 @@ MAX_TITLE_LENGTH = 60  # longest title a user can give a chat
 INDENT_TAGS = ("code", "codehead", "quote") + tuple("li%d" % n for n in range(5))
 
 
+class InvalidOllamaResponse(ValueError):
+    """The decoded response does not contain a usable chat message."""
+
+
+def ollama_answer(data):
+    if not isinstance(data, dict):
+        raise InvalidOllamaResponse()
+    message = data.get("message")
+    if not isinstance(message, dict):
+        raise InvalidOllamaResponse()
+    content = message.get("content")
+    if not isinstance(content, str):
+        raise InvalidOllamaResponse()
+    return content.strip()
+
+
+def ollama_stream_chunk(data):
+    """Extract (token, is_done) from an Ollama stream chunk dictionary.
+
+    Raises InvalidOllamaResponse if data is not a dictionary or has an invalid structure.
+    """
+    if not isinstance(data, dict):
+        raise InvalidOllamaResponse()
+    done = bool(data.get("done", False))
+    if done and "message" not in data:
+        return "", True
+
+    message = data.get("message")
+    if not isinstance(message, dict):
+        raise InvalidOllamaResponse()
+    content = message.get("content")
+    if not isinstance(content, str):
+        raise InvalidOllamaResponse()
+    return content, done
+
+
+def iter_response_lines(response):
+    """Yield lines from a requests response, supporting both live streaming and mock _content."""
+    if getattr(response, "raw", None) is not None:
+        yield from response.iter_lines()
+    elif getattr(response, "_content", None):
+        for line in response._content.splitlines():
+            yield line
+
 LIGHT = {
     "bg": "#F7F4FF", "sidebar": "#EEE8FF", "panel": "#FFFFFF",
     "text": "#27213B", "muted": "#756B91", "accent": "#8B5CF6",
@@ -46,6 +90,72 @@ DARK = {
 
 def message_time_text():
     return local_now().strftime("%I:%M %p")
+
+
+class FlatButton(tk.Label):
+    """A tk.Label that behaves like a tk.Button.
+
+    On macOS, Tk draws tk.Button with the native Aqua style and ignores bg and
+    activebackground, so themed buttons (white text) become unreadable. A Label
+    respects every colour option, so it is used as the button there instead.
+    It accepts the same options as tk.Button, including command and state.
+    """
+
+    def __init__(self, master=None, command=None, **kwargs):
+        super().__init__(master, **kwargs)
+        self._command = command
+        self._pressed = False
+        # Class-level bindings live in their own bindtag, so a widget's own
+        # bind("<Enter>", ...) (like the Copy button's hover) does not replace them.
+        self.bindtags((self.bindtags()[0], "FlatButton") + self.bindtags()[1:])
+        if not self.bind_class("FlatButton"):
+            self.bind_class("FlatButton", "<Enter>", FlatButton._on_enter)
+            self.bind_class("FlatButton", "<Leave>", FlatButton._on_leave)
+            self.bind_class("FlatButton", "<ButtonPress-1>", FlatButton._on_press)
+            self.bind_class("FlatButton", "<ButtonRelease-1>", FlatButton._on_release)
+
+    def configure(self, cnf=None, **kwargs):
+        if "command" in kwargs:
+            self._command = kwargs.pop("command")
+        if cnf is None and not kwargs:
+            return super().configure()
+        return super().configure(cnf, **kwargs)
+
+    config = configure
+
+    def invoke(self):
+        if str(self["state"]) != "disabled" and self._command:
+            return self._command()
+
+    @staticmethod
+    def _on_enter(event):
+        widget = event.widget
+        if str(widget["state"]) != "disabled":
+            widget.configure(state="active")  # shows activebackground / activeforeground
+
+    @staticmethod
+    def _on_leave(event):
+        widget = event.widget
+        widget._pressed = False
+        if str(widget["state"]) != "disabled":
+            widget.configure(state="normal")
+
+    @staticmethod
+    def _on_press(event):
+        event.widget._pressed = str(event.widget["state"]) != "disabled"
+
+    @staticmethod
+    def _on_release(event):
+        widget = event.widget
+        inside = 0 <= event.x < widget.winfo_width() and 0 <= event.y < widget.winfo_height()
+        if widget._pressed and inside:
+            widget._pressed = False
+            widget.invoke()
+        widget._pressed = False
+
+
+# tk.Button keeps the native look elsewhere; on macOS it ignores the theme colours.
+Button = FlatButton if sys.platform == "darwin" else tk.Button
 
 
 class FlatButton(tk.Label):
@@ -141,8 +251,14 @@ class JugnuApp:
         self.bubble_items = []
         self._resize_timer = None
         self.canvas_width = None
+        self.is_streaming = False
+        self.current_stream_chat_id = None
+        self.current_stream_response = None
+        self.stop_event = threading.Event()
+        self.streaming_bubble_info = None
 
         self.build_ui()
+        self.root.bind("<Escape>", self._on_escape)
         if self.chats:
             self.current_id = self.chats[-1]["id"]  # Reopen most recent saved conversation.
         else:
@@ -414,7 +530,10 @@ class JugnuApp:
         self.input_box.bind("<Shift-Return>", lambda event: None)
         self.send_btn = Button(self.bottom, command=self.send_message,
                                   relief="flat", font=("Segoe UI", 10, "bold"), padx=18, pady=12)
+                               relief="flat", font=("Segoe UI", 10, "bold"), padx=18, pady=12)
         self.send_btn.pack(side="right")
+        self.stop_gen_btn = Button(self.bottom, command=self.stop_generating,
+                                   relief="flat", font=("Segoe UI", 10, "bold"), padx=16, pady=12)
 
     def on_frame_configure(self, _event=None):
         self.canvas.configure(scrollregion=self.canvas.bbox("all"))
@@ -569,6 +688,9 @@ class JugnuApp:
         self.input_box.configure(bg=c["entry"], fg=c["text"], insertbackground=c["text"])
         self.send_btn.configure(bg=c["accent"], fg="white", activebackground=c["accent2"],
                                 activeforeground="white", cursor="hand2")
+        if hasattr(self, "stop_gen_btn"):
+            self.stop_gen_btn.configure(bg=c["danger"], fg=c["accent2"], activebackground=c["danger"],
+                                        activeforeground=c["text"], cursor="hand2")
         self.theme_btn.configure(text=self.theme_button_text())
         self.update_voice_window()
         self.refresh_history_list()
@@ -749,6 +871,8 @@ class JugnuApp:
         self.vw = {}
 
     def on_close(self):
+        if getattr(self, "is_streaming", False):
+            self.stop_generating()
         if self._resize_timer:
             try:
                 self.root.after_cancel(self._resize_timer)
@@ -756,6 +880,22 @@ class JugnuApp:
                 pass
         self.tts.shutdown()
         self.root.destroy()
+
+    def _on_escape(self, _event=None):
+        if getattr(self, "is_streaming", False):
+            self.stop_generating()
+
+    def stop_generating(self):
+        """Abort an in-progress Ollama stream generation."""
+        if not getattr(self, "is_streaming", False):
+            return
+        if hasattr(self, "stop_event") and self.stop_event is not None:
+            self.stop_event.set()
+        if getattr(self, "current_stream_response", None) is not None:
+            try:
+                self.current_stream_response.close()
+            except Exception:
+                pass
 
     def t(self, key, **kwargs):
         """Look up a user-facing string in the currently selected language."""
@@ -785,6 +925,8 @@ class JugnuApp:
         self.theme_btn.configure(text=self.theme_button_text())
         self.header_title.configure(text=self.t("header_title"))
         self.send_btn.configure(text=self.t("send_btn"))
+        if hasattr(self, "stop_gen_btn"):
+            self.stop_gen_btn.configure(text=self.t("stop_btn"))
         key, kwargs = self._status
         self.set_status(key, **kwargs)
 
@@ -887,6 +1029,8 @@ class JugnuApp:
         if not messagebox.askyesno(self.t("delete_chat_title"),
                                    self.t("delete_chat_message", title=chat.get("title", ""))):
             return
+        if getattr(self, "is_streaming", False) and getattr(self, "current_stream_chat_id", None) == chat_id:
+            self.stop_generating()
         was_open = chat_id == self.current_id
         self.chats = [saved for saved in self.chats if saved.get("id") != chat_id]  # only this chat goes
         if was_open:
@@ -957,6 +1101,8 @@ class JugnuApp:
             return
         if not messagebox.askyesno(self.t("clear_dialog_title"), self.t("clear_dialog_message")):
             return
+        if getattr(self, "is_streaming", False) and getattr(self, "current_stream_chat_id", None) == chat.get("id"):
+            self.stop_generating()
         self.tts.stop()
         self.chats = [saved for saved in self.chats if saved.get("id") != chat.get("id")]
         self.draft_chat = None
@@ -1391,8 +1537,249 @@ class JugnuApp:
             self.finish_answer(answer, chat["id"])
             return "break"
 
+        self.busy = True
+        self.is_streaming = True
+        self.current_stream_chat_id = chat["id"]
+        if hasattr(self, "stop_event") and self.stop_event is not None:
+            self.stop_event.clear()
+        self.send_btn.configure(state="disabled")
+        if hasattr(self, "stop_gen_btn"):
+            self.stop_gen_btn.pack(side="right", padx=(0, 8))
+        self.set_status("status_streaming")
+        time_assistant = message_time_text()
+        self.create_streaming_bubble(chat["id"], timestamp=time_assistant)
+
         threading.Thread(target=self.ask_ollama, args=(chat["id"],), daemon=True).start()
         return "break"
+
+    def create_streaming_bubble(self, chat_id, timestamp=None):
+        if getattr(self, "current_id", None) != chat_id:
+            self.streaming_bubble_info = None
+            return None
+
+        c = getattr(self, "colors", LIGHT)
+        row = tk.Frame(self.messages_frame, bg=c["bg"])
+        row.pack(fill="x", pady=7, padx=8)
+        bubble = tk.Frame(row, bg=c["assistant"])
+        bubble.pack(side="left", padx=(0, 40))
+        header = tk.Frame(bubble, bg=bubble["bg"])
+        header.pack(fill="x", padx=12, pady=(8, 2))
+
+        name_lbl = tk.Label(header, text="🤖 JUGNU", bg=bubble["bg"], fg=c["accent"],
+                            font=("Segoe UI", 9, "bold"), anchor="w")
+        name_lbl.pack(side="left")
+
+        time_lbl = None
+        if timestamp:
+            time_lbl = tk.Label(header, text=timestamp, bg=bubble["bg"], fg=c["muted"],
+                                font=("Segoe UI", 8), anchor="w")
+            time_lbl.pack(side="left", padx=(8, 0))
+
+        read_btn = None
+        if hasattr(self, "tts"):
+            read_btn = tk.Button(header, text="🔊", command=lambda: None,
+                                 relief="flat", bd=0, font=("Segoe UI Emoji", 10), cursor="hand2",
+                                 bg=bubble["bg"], fg=c["accent"], activebackground=bubble["bg"],
+                                 activeforeground=c["accent2"], disabledforeground=c["muted"],
+                                 state="disabled")
+            read_btn.pack(side="right", padx=(4, 0))
+            if hasattr(self, "read_buttons"):
+                self.read_buttons.append(read_btn)
+
+        copy_btn = tk.Button(header, text="⧉ Copy", font=("Segoe UI", 8, "bold"),
+                             relief="flat", bd=0, highlightthickness=0,
+                             bg=bubble["bg"], fg=c["muted"],
+                             highlightbackground=bubble["bg"],
+                             activebackground=c["border"], activeforeground=c["accent"],
+                             cursor="hand2", padx=6, pady=1, state="disabled")
+        copy_btn.pack(side="right", padx=(8, 0))
+
+        hover_bg = c["border"]
+
+        def on_btn_enter(_event):
+            try:
+                if "Copied" not in copy_btn.cget("text"):
+                    copy_btn.configure(fg=c["accent"], bg=hover_bg)
+            except tk.TclError:
+                pass
+
+        def on_btn_leave(_event):
+            try:
+                if "Copied" not in copy_btn.cget("text"):
+                    copy_btn.configure(fg=c["muted"], bg=bubble["bg"])
+                else:
+                    copy_btn.configure(bg=bubble["bg"])
+            except tk.TclError:
+                pass
+
+        copy_btn.bind("<Enter>", on_btn_enter)
+        copy_btn.bind("<Leave>", on_btn_leave)
+
+        txt = tk.Text(bubble, font=self.bubble_font, wrap="word", width=18,
+                      relief="flat", bd=0, highlightthickness=0,
+                      bg=bubble["bg"], fg=c["text"],
+                      selectbackground=c["accent"], selectforeground="white",
+                      inactiveselectbackground=c["accent"], cursor="xterm", height=1)
+        txt.pack(fill="x", padx=12, pady=(2, 10))
+
+        widgets_to_bind = [row, bubble, header, name_lbl, copy_btn, txt]
+        if read_btn:
+            widgets_to_bind.append(read_btn)
+        if time_lbl:
+            widgets_to_bind.append(time_lbl)
+        for w in widgets_to_bind:
+            w.bind("<MouseWheel>", self.on_mousewheel)
+            w.bind("<Button-4>", self.on_mousewheel)
+            w.bind("<Button-5>", self.on_mousewheel)
+
+        self.streaming_bubble_info = {
+            "chat_id": chat_id,
+            "row": row,
+            "bubble": bubble,
+            "header": header,
+            "txt": txt,
+            "copy_btn": copy_btn,
+            "read_btn": read_btn,
+            "timestamp": timestamp,
+        }
+        if hasattr(self, "canvas"):
+            self.canvas.configure(scrollregion=self.canvas.bbox("all"))
+            self.canvas.yview_moveto(1.0)
+        return self.streaming_bubble_info
+
+    def append_stream_token(self, chat_id, token):
+        if not token:
+            return
+        if getattr(self, "streaming_bubble_info", None) and self.streaming_bubble_info.get("chat_id") == chat_id:
+            txt = self.streaming_bubble_info["txt"]
+            try:
+                txt.configure(state="normal")
+                txt.insert("end", token)
+                full_text = txt.get("1.0", "end - 1c")
+                canvas_w = self.current_canvas_width(fallback=580)
+                calc_cols = self.compute_bubble_cols(full_text, canvas_w)
+                txt.configure(width=calc_cols)
+                self.root.update_idletasks()
+                h = self.fit_bubble_height(txt, full_text)
+                txt.configure(height=h, state="disabled")
+                if hasattr(self, "canvas"):
+                    self.canvas.configure(scrollregion=self.canvas.bbox("all"))
+                    self.canvas.yview_moveto(1.0)
+            except tk.TclError:
+                pass
+
+    def finish_streaming(self, chat_id, accumulated_text, is_error=False, error_message=None):
+        self.busy = False
+        self.is_streaming = False
+        self.current_stream_chat_id = None
+        self.current_stream_response = None
+        if hasattr(self, "stop_event") and self.stop_event is not None:
+            self.stop_event.clear()
+
+        # Hide Stop button and restore Send button
+        if hasattr(self, "stop_gen_btn"):
+            try:
+                self.stop_gen_btn.pack_forget()
+            except Exception:
+                pass
+        if hasattr(self, "send_btn"):
+            try:
+                self.send_btn.configure(state="normal")
+            except Exception:
+                pass
+        if hasattr(self, "set_status"):
+            self.set_status("status_ready")
+
+        chat = next((ct for ct in self.chats if ct.get("id") == chat_id), None)
+        timestamp = message_time_text()
+
+        # Case 1: Error or no non-whitespace text generated
+        if is_error or not accumulated_text.strip():
+            if getattr(self, "streaming_bubble_info", None) and self.streaming_bubble_info.get("chat_id") == chat_id:
+                try:
+                    self.streaming_bubble_info["row"].destroy()
+                except (tk.TclError, KeyError):
+                    pass
+                self.streaming_bubble_info = None
+
+            notice = error_message or get_string(self.language, "error_empty_reply")
+            if chat:
+                chat["messages"].append({
+                    "role": "assistant",
+                    "content": notice,
+                    "time": timestamp,
+                    "is_error": True
+                })
+                self.save_history()
+
+            if chat and chat.get("id") == self.current_id:
+                self.add_bubble("assistant", notice, timestamp=timestamp)
+                if hasattr(self, "canvas"):
+                    self.canvas.yview_moveto(1.0)
+            if hasattr(self, "refresh_history_list"):
+                self.refresh_history_list()
+            return
+
+        # Case 2: Generated tokens present (completed normally, stopped, or partial before error)
+        final_text = accumulated_text.strip()
+        if final_text and chat:
+            msg = {
+                "role": "assistant",
+                "content": final_text,
+                "time": timestamp
+            }
+            if is_error:
+                msg["is_error"] = True
+            chat["messages"].append(msg)
+            self.save_history()
+
+        # Finalize the visual bubble on screen if still viewing this chat
+        if getattr(self, "streaming_bubble_info", None) and self.streaming_bubble_info.get("chat_id") == chat_id:
+            info = self.streaming_bubble_info
+            self.streaming_bubble_info = None
+            measure_text = final_text
+            try:
+                txt = info["txt"]
+                txt.configure(state="normal")
+                txt.delete("1.0", "end")
+                segments = render_markdown(final_text)
+                canvas_w = self.current_canvas_width(fallback=580)
+                measure_text, _ = self.fill_bubble_text(txt, final_text, segments)
+                calc_cols = self.compute_bubble_cols(measure_text, canvas_w)
+                txt.configure(width=calc_cols)
+                self.root.update_idletasks()
+                h = self.fit_bubble_height(txt, measure_text)
+                txt.configure(height=h, state="disabled")
+                copy_btn = info["copy_btn"]
+                copy_btn.configure(
+                    state="normal",
+                    command=lambda t=final_text, b=copy_btn: self.copy_to_clipboard(t, b)
+                )
+                read_btn = info["read_btn"]
+                if read_btn and hasattr(self, "tts") and self.tts.available:
+                    read_btn.configure(
+                        state="normal",
+                        command=lambda t=final_text: self.read_aloud(t)
+                    )
+                if hasattr(self, "bubble_items"):
+                    self.bubble_items.append((info["bubble"], txt, measure_text))
+            except (tk.TclError, KeyError):
+                pass
+
+            if getattr(self, "voice_enabled", False) and not is_error:
+                if hasattr(self, "tts"):
+                    self.tts.speak(plain_text(final_text))
+
+        elif chat and chat.get("id") == self.current_id and final_text:
+            self.add_bubble("assistant", final_text, timestamp=timestamp)
+            if hasattr(self, "canvas"):
+                self.canvas.yview_moveto(1.0)
+            if getattr(self, "voice_enabled", False) and not is_error:
+                if hasattr(self, "tts"):
+                    self.tts.speak(plain_text(final_text))
+
+        if hasattr(self, "refresh_history_list"):
+            self.refresh_history_list()
 
     def ask_ollama(self, chat_id):
         language = self.language  # The prompt and any error text use the language chosen at send time.
@@ -1421,8 +1808,94 @@ class JugnuApp:
         else:
             answer = get_string(language, "error_generic", error=result.detail)
         self.root.after(0, lambda: self.finish_answer(answer, chat_id, is_error=is_error))
+        accumulated = []
+        is_error = False
+        error_message = None
+
+        if not hasattr(self, "stop_event") or self.stop_event is None:
+            self.stop_event = threading.Event()
+
+        try:
+            chat = next((c for c in self.chats if c.get("id") == chat_id), None)
+            if not chat:
+                # The conversation may have been cleared while the request was running.
+                self.root.after(0, lambda: self.finish_streaming(chat_id, "", is_error=True))
+                return
+            # Keep recent context only, to reduce prompt size and improve latency.
+            recent = [
+                m for m in chat.get("messages", [])
+                if not (m["role"] == "assistant" and m.get("is_error") is True)
+            ][-10:]
+            messages = [{
+                "role": "system",
+                "content": build_system_prompt(language, local_datetime_text())
+            }]
+            messages.extend({"role": m["role"], "content": m["content"]} for m in recent)
+            response = requests.post(OLLAMA_URL, json={
+                "model": MODEL,
+                "messages": messages,
+                "stream": True,
+                "keep_alive": "10m",
+                "options": {"num_predict": 256, "temperature": 0.6}
+            }, stream=True, timeout=180)
+            self.current_stream_response = response
+            response.raise_for_status()
+
+            for line in iter_response_lines(response):
+                if self.stop_event.is_set():
+                    break
+                if not line:
+                    continue
+                try:
+                    if isinstance(line, (bytes, bytearray)):
+                        raw_str = line.decode("utf-8").strip()
+                    else:
+                        raw_str = str(line).strip()
+                    if not raw_str:
+                        continue
+                    data = json.loads(raw_str)
+                except (UnicodeDecodeError, json.JSONDecodeError):
+                    raise InvalidOllamaResponse()
+
+                token, is_done = ollama_stream_chunk(data)
+                if token:
+                    accumulated.append(token)
+                    self.root.after(0, lambda t=token: self.append_stream_token(chat_id, t))
+                if is_done:
+                    break
+
+            if not "".join(accumulated).strip() and not self.stop_event.is_set():
+                is_error = True
+                error_message = get_string(language, "error_empty_reply")
+
+        except InvalidOllamaResponse:
+            is_error = True
+            error_message = get_string(language, "error_invalid_response")
+        except requests.Timeout:
+            is_error = True
+            error_message = get_string(language, "error_timeout")
+        except requests.ConnectionError:
+            is_error = True
+            error_message = get_string(language, "error_connection")
+        except (requests.RequestException, ValueError) as e:
+            is_error = True
+            error_message = get_string(language, "error_generic", error=e)
+        finally:
+            full_text = "".join(accumulated)
+            self.root.after(0, lambda: self.finish_streaming(
+                chat_id, full_text, is_error=is_error, error_message=error_message
+            ))
 
     def finish_answer(self, answer, chat_id=None, is_error=False):
+        self.busy = False
+        self.is_streaming = False
+        self.current_stream_chat_id = None
+        self.current_stream_response = None
+        if hasattr(self, "stop_gen_btn"):
+            try:
+                self.stop_gen_btn.pack_forget()
+            except Exception:
+                pass
         chat = self.current_chat()
         if chat_id:
             chat = next((c for c in self.chats if c.get("id") == chat_id), None)
@@ -1436,13 +1909,18 @@ class JugnuApp:
         # Only display if the user is still viewing the chat that received the answer.
         if chat and chat.get("id") == self.current_id:
             self.add_bubble("assistant", answer, timestamp=time_now)
-            self.canvas.yview_moveto(1.0)
-            if self.voice_enabled:
+            if hasattr(self, "canvas"):
+                self.canvas.yview_moveto(1.0)
+            if getattr(self, "voice_enabled", False) and hasattr(self, "tts"):
                 self.tts.speak(plain_text(answer))
-        self.busy = False
-        self.send_btn.configure(state="normal")
-        self.set_status("status_ready")
-        self.refresh_history_list()
+        if hasattr(self, "busy"):
+            self.busy = False
+        if hasattr(self, "send_btn"):
+            self.send_btn.configure(state="normal")
+        if hasattr(self, "set_status"):
+            self.set_status("status_ready")
+        if hasattr(self, "refresh_history_list"):
+            self.refresh_history_list()
 
 if __name__ == "__main__":
     root = tk.Tk()

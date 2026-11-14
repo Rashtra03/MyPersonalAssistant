@@ -5,7 +5,12 @@ from datetime import datetime
 import pytest
 
 import desktop_app
-from desktop_app import JugnuApp, message_time_text, DARK, LIGHT
+from desktop_app import JugnuApp, message_time_text, DARK, LIGHT, FlatButton
+
+
+def is_text_label(widget):
+    # On macOS the buttons are FlatButtons, which are tk.Label subclasses.
+    return isinstance(widget, tk.Label) and not isinstance(widget, FlatButton)
 
 
 def test_message_time_text_format():
@@ -163,7 +168,7 @@ def test_add_bubble_renders_timestamp_and_theme_colors(tk_app):
     bubble_frame = bubble_row.winfo_children()[0]
     header_frame = bubble_frame.winfo_children()[0]
 
-    labels = [w for w in header_frame.winfo_children() if isinstance(w, tk.Label)]
+    labels = [w for w in header_frame.winfo_children() if is_text_label(w)]
     time_labels = [l for l in labels if l.cget("text") == "02:15 PM"]
     assert len(time_labels) == 1
     time_lbl = time_labels[0]
@@ -184,7 +189,7 @@ def test_add_bubble_renders_timestamp_and_theme_colors(tk_app):
     bubble_frame_light = bubble_row_light.winfo_children()[0]
     header_frame_light = bubble_frame_light.winfo_children()[0]
 
-    labels_light = [w for w in header_frame_light.winfo_children() if isinstance(w, tk.Label)]
+    labels_light = [w for w in header_frame_light.winfo_children() if is_text_label(w)]
     time_labels_light = [l for l in labels_light if l.cget("text") == "02:15 PM"]
     assert len(time_labels_light) == 1
     time_lbl_light = time_labels_light[0]
@@ -202,7 +207,7 @@ def test_add_bubble_without_timestamp_has_no_time_label(tk_app):
     bubble_frame = bubble_row.winfo_children()[0]
     header_frame = bubble_frame.winfo_children()[0]
 
-    labels = [w for w in header_frame.winfo_children() if isinstance(w, tk.Label)]
+    labels = [w for w in header_frame.winfo_children() if is_text_label(w)]
     assert len(labels) == 1  # Only name_lbl ("You")
     assert labels[0].cget("text") == app.t("you_label")
 
@@ -284,7 +289,7 @@ def test_switching_between_old_and_new_chats_renders_correctly(tk_app):
     assert len(rows) == 2
     for row in rows:
         header = row.winfo_children()[0].winfo_children()[0]
-        labels = [w for w in header.winfo_children() if isinstance(w, tk.Label)]
+        labels = [w for w in header.winfo_children() if is_text_label(w)]
         # Only the sender name label, no timestamp label
         assert len(labels) == 1
 
@@ -297,13 +302,13 @@ def test_switching_between_old_and_new_chats_renders_correctly(tk_app):
 
     # User bubble in new chat
     user_header = rows[0].winfo_children()[0].winfo_children()[0]
-    user_labels = [w for w in user_header.winfo_children() if isinstance(w, tk.Label)]
+    user_labels = [w for w in user_header.winfo_children() if is_text_label(w)]
     assert len(user_labels) == 2
     assert user_labels[1].cget("text") == "11:20 AM"
 
     # Assistant bubble in new chat
     assistant_header = rows[1].winfo_children()[0].winfo_children()[0]
-    assistant_labels = [w for w in assistant_header.winfo_children() if isinstance(w, tk.Label)]
+    assistant_labels = [w for w in assistant_header.winfo_children() if is_text_label(w)]
     assert len(assistant_labels) == 2
     assert assistant_labels[1].cget("text") == "11:21 AM"
 

@@ -13,6 +13,31 @@ from core import (
     chat,
     is_time_question,
     local_now,
+import ast
+import datetime
+import json
+import operator
+import re
+import sys
+
+import requests
+
+# Optional conversational openers/closers so polite phrasing still triggers
+# local time/date replies without allowing unrelated sentences to match.
+_GREETING_PREFIX = (
+    r"(?:(?:hey|hi|hello|jugnu|ok|okay|please|pls|plz|sorry|wait|"
+    r"excuse\s+me|bhai|yaar|ji)[,:\s]+)*"
+)
+_ASK_PREFIX = (
+    r"(?:(?:can|could|would|will)\s+you\s+(?:please\s+)?)?"
+    r"(?:(?:tell|show|give)\s+me[,:\s]+|do\s+you\s+(?:know|have)[,:\s]+)?"
+)
+_POLITE_SUFFIX = (
+    r"(?:[,\s]+(?:please|pls|plz|right\s+now|now|today|abhi|bhai|yaar|ji|jugnu))*"
+)
+_TIME_OR_DATE_NOUN = (
+    r"(?:date\s+(?:and|&)\s+time|time\s+(?:and|&)\s+date|"
+    r"day\s+(?:and|&)\s+date|date\s+(?:and|&)\s+day|time|date)"
 )
 
 # calculate() and is_time_question() now live in core.py; they stay importable from here.
@@ -77,20 +102,95 @@ def ask_ai(user_message):
 
     if result.error == ERROR_CONNECTION:
         return (
+def ask_ai(user_message, stream=True):
+    try:
+        response = requests.post(
+            OLLAMA_URL,
+            json={
+                "model": MODEL,
+                "messages": [
+                    {
+                        "role": "system",
+                        "content": SYSTEM_PROMPT
+                    },
+                    {
+                        "role": "user",
+                        "content": user_message
+                    }
+                ],
+                "stream": stream
+            },
+            stream=stream,
+            timeout=120
+        )
+
+        response.raise_for_status()
+
+        if stream:
+            collected = []
+            lines = (
+                response.iter_lines()
+                if getattr(response, "raw", None) is not None
+                else (response._content.splitlines() if getattr(response, "_content", None) else [])
+            )
+            for line in lines:
+                if not line:
+                    continue
+                try:
+                    raw_str = (
+                        line.decode("utf-8").strip()
+                        if isinstance(line, (bytes, bytearray))
+                        else str(line).strip()
+                    )
+                    if not raw_str:
+                        continue
+                    data = json.loads(raw_str)
+                    content = data.get("message", {}).get("content", "")
+                    if content:
+                        sys.stdout.write(content)
+                        sys.stdout.flush()
+                        collected.append(content)
+                    if data.get("done", False):
+                        break
+                except (json.JSONDecodeError, AttributeError):
+                    continue
+            if collected:
+                print()
+            return "".join(collected).strip()
+
+        data = response.json()
+        answer = data["message"]["content"]
+        return answer.strip()
+
+    except requests.exceptions.ConnectionError:
+        msg = (
             "I cannot connect to Ollama. "
             "Please make sure Ollama is running."
         )
+        if stream:
+            print(msg)
+        return msg
 
     if result.error == ERROR_TIMEOUT:
         return (
+    except requests.exceptions.Timeout:
+        msg = (
             "The AI is taking too long to respond. "
             "Please try again."
         )
+        if stream:
+            print(msg)
+        return msg
 
     if result.error == ERROR_INVALID:
         return "An error occurred: Ollama returned an invalid response."
 
     return f"An error occurred: {result.detail}"
+    except Exception as error:
+        msg = f"An error occurred: {error}"
+        if stream:
+            print(msg)
+        return msg
 
 
 # ---------------- HELP ----------------
@@ -142,9 +242,8 @@ def run_assistant():
 
         # General AI question
         else:
-            print("\nAssistant: Thinking...")
-            answer = ask_ai(user_input)
-            print("\nAssistant:", answer)
+            print("\nAssistant: ", end="", flush=True)
+            ask_ai(user_input, stream=True)
 
 
 # ---------------- START ----------------
