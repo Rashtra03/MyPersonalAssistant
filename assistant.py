@@ -19,6 +19,7 @@ from core import (
 )
 from export_manager import export_chat
 from personas import get_persona, list_personas
+from scheduler import CronEvaluator, ScheduledTask, TaskStore
 from search_engine import SearchEngine
 
 # calculate() and is_time_question() now live in core.py; they stay importable from here.
@@ -127,8 +128,9 @@ def show_help():
     print("6. /search <query>       - Search across conversation history")
     print("7. /export [id] <format> - Export chat to md, html, json, or txt")
     print("8. /chats                - List all saved conversation history")
-    print("9. help                  - Show available commands")
-    print("10. bye                  - Exit the assistant")
+    print("9. /schedule             - Manage proactive background tasks and cron jobs")
+    print("10. help                 - Show available commands")
+    print("11. bye                  - Exit the assistant")
     print("\nYou can also ask any general question.")
 
 
@@ -249,6 +251,101 @@ def run_assistant(persona_name="default"):
                 for idx, c in enumerate(history, 1):
                     msg_count = len(c.get("messages", []))
                     print(f"{idx}. [{c.get('id')[:8]}] {c.get('title', 'New Chat')} ({msg_count} messages)")
+
+        # Schedule / Automation commands
+        elif command.startswith("/schedule") or command.startswith("/cron") or command.startswith("schedule"):
+            store = TaskStore()
+            args_str = user_input.split(maxsplit=1)[1].strip() if len(user_input.split(maxsplit=1)) > 1 else ""
+            subparts = args_str.split(maxsplit=1)
+            subcmd = subparts[0].lower() if subparts else "list"
+
+            if subcmd in ["list", ""]:
+                tasks = store.all()
+                if not tasks:
+                    print("\nAssistant: No scheduled automation tasks found. Use '/schedule add' to create one.")
+                else:
+                    print(f"\nScheduled Tasks ({len(tasks)}):")
+                    for idx, t in enumerate(tasks, 1):
+                        status_mark = "● Active" if t.enabled else "⏸ Paused"
+                        print(f"{idx}. [{t.id}] {t.title} ({status_mark})")
+                        print(f"   Schedule: {t.cron_expression} (Next: {t.next_run or 'N/A'})")
+                        print(f"   Prompt:   {t.prompt[:80]}{'…' if len(t.prompt) > 80 else ''}")
+            elif subcmd == "add":
+                rem = subparts[1] if len(subparts) > 1 else ""
+                import shlex
+                try:
+                    tokens = shlex.split(rem)
+                except Exception:
+                    tokens = rem.split()
+                if len(tokens) < 2:
+                    print("\nAssistant: Usage: /schedule add \"<cron>\" \"<prompt>\" [--name \"<title>\"]")
+                else:
+                    cron_exp = tokens[0]
+                    prompt_text = tokens[1]
+                    title_text = "Scheduled Task"
+                    if "--name" in tokens:
+                        n_idx = tokens.index("--name")
+                        if n_idx + 1 < len(tokens):
+                            title_text = tokens[n_idx + 1]
+                    try:
+                        t = store.add(title=title_text, cron_expression=cron_exp, prompt=prompt_text, persona=active_persona.id)
+                        print(f"\nAssistant: Successfully scheduled task [{t.id}] '{t.title}' for '{t.cron_expression}'.")
+                    except Exception as e:
+                        print(f"\nAssistant: Error scheduling task: {e}")
+            elif subcmd == "run":
+                target_id = subparts[1].strip() if len(subparts) > 1 else ""
+                task = store.get(target_id)
+                if not task:
+                    all_tasks = store.all()
+                    try:
+                        idx = int(target_id) - 1
+                        if 0 <= idx < len(all_tasks):
+                            task = all_tasks[idx]
+                    except ValueError:
+                        pass
+                if not task:
+                    print(f"\nAssistant: Task '{target_id}' not found.")
+                else:
+                    print(f"\nAssistant: Executing scheduled task [{task.id}] '{task.title}'...")
+                    answer = ask_ai(task.prompt, persona=task.persona)
+                    print(f"\nResult:\n{answer}")
+                    now_str = local_now().isoformat()
+                    store.update(task.id, last_status="success", last_output=answer[:160], last_run=now_str)
+            elif subcmd == "toggle":
+                target_id = subparts[1].strip() if len(subparts) > 1 else ""
+                task = store.get(target_id)
+                if not task:
+                    all_tasks = store.all()
+                    try:
+                        idx = int(target_id) - 1
+                        if 0 <= idx < len(all_tasks):
+                            task = all_tasks[idx]
+                    except ValueError:
+                        pass
+                if not task:
+                    print(f"\nAssistant: Task '{target_id}' not found.")
+                else:
+                    t = store.toggle(task.id)
+                    state = "enabled" if t.enabled else "disabled"
+                    print(f"\nAssistant: Task '{t.title}' is now {state}.")
+            elif subcmd == "delete":
+                target_id = subparts[1].strip() if len(subparts) > 1 else ""
+                task = store.get(target_id)
+                if not task:
+                    all_tasks = store.all()
+                    try:
+                        idx = int(target_id) - 1
+                        if 0 <= idx < len(all_tasks):
+                            task = all_tasks[idx]
+                    except ValueError:
+                        pass
+                if not task:
+                    print(f"\nAssistant: Task '{target_id}' not found.")
+                else:
+                    store.delete(task.id)
+                    print(f"\nAssistant: Deleted scheduled task [{task.id}] '{task.title}'.")
+            else:
+                print(f"\nAssistant: Unknown schedule action '{subcmd}'. Available: list, add, run, toggle, delete.")
 
         # General AI question
         else:

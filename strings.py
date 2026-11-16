@@ -82,6 +82,16 @@ STRINGS = {
         "persona_delete_confirm": "Delete persona “{name}”? This cannot be undone.",
         "persona_builtin_badge": "Built-in",
         "persona_custom_badge": "Custom",
+        # Automation & Scheduler
+        "auto_btn": "⏱  Tasks",
+        "auto_dialog_title": "Automation Studio",
+        "auto_task_label": "Scheduled Tasks",
+        "auto_task_new": "+ New Task",
+        "auto_task_run": "Run Now",
+        "auto_task_pause": "Pause Scheduler",
+        "auto_task_resume": "Resume Scheduler",
+        "auto_notify_success": "Task “{name}” completed successfully.",
+        "auto_notify_error": "Task “{name}” failed: {error}",
         # Replies shown when something goes wrong
         "error_empty_reply": "Sorry, I got an empty response. Please try again.",
         "error_invalid_response": "Ollama returned an invalid response. Please try again.",
@@ -165,6 +175,16 @@ STRINGS = {
         "persona_delete_confirm": "Kya aap “{name}” ko delete karna chahte hain?",
         "persona_builtin_badge": "Built-in",
         "persona_custom_badge": "Custom",
+        # Automation & Scheduler
+        "auto_btn": "⏱  Tasks",
+        "auto_dialog_title": "Automation Studio",
+        "auto_task_label": "Scheduled Tasks",
+        "auto_task_new": "+ Naya Task",
+        "auto_task_run": "Abhi Chalao",
+        "auto_task_pause": "Scheduler Roko",
+        "auto_task_resume": "Scheduler Shuru Karo",
+        "auto_notify_success": "Task “{name}” safaltapoorvak pura ho gaya.",
+        "auto_notify_error": "Task “{name}” fail ho gaya: {error}",
         # Replies shown when something goes wrong
         "error_empty_reply": "Sorry, mujhe empty response mila. Ek baar phir try karo.",
         "error_invalid_response": "Ollama se sahi jawab nahi mila. Ek baar phir try karo.",
