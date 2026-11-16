@@ -22,6 +22,7 @@ OLLAMA_URL = "http://localhost:11434/api/chat"
 MODEL = "llama3.2:3b"
 HISTORY_FILE = "jugnu_history.json"
 SETTINGS_FILE = "jugnu_settings.json"
+TASKS_FILE = "jugnu_tasks.json"
 MAX_LIST_TITLE = 34    # longer chat titles are shortened with "…" in the sidebar list
 MAX_TITLE_LENGTH = 60  # longest title a user can give a chat
 NEW_CHAT_TITLE = "New Chat"

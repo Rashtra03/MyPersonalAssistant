@@ -13,16 +13,19 @@ from PySide6.QtGui import QFontDatabase, QKeySequence, QPixmap, QShortcut, QText
 from PySide6.QtWidgets import (QApplication, QComboBox, QDialog, QFileDialog, QFrame, QHBoxLayout,
                                QInputDialog, QLabel, QLineEdit, QListWidget, QListWidgetItem,
                                QMainWindow, QMenu, QMessageBox, QPlainTextEdit, QPushButton,
-                               QScrollArea, QSizePolicy, QSlider, QTextBrowser, QVBoxLayout,
+                               QScrollArea, QSizePolicy, QSlider, QSystemTrayIcon, QTextBrowser, QVBoxLayout,
                                QWidget)
 
 import jugnu_core as core
+from automation_dialog import AutomationDialog
 from export_manager import export_chat
 from history_lock import HistoryInUseError, HistoryLock
 from markdown_render import plain_text, render_html
 from personas import get_default_manager, get_persona, list_personas
+from scheduler import BackgroundScheduler, CronEvaluator, ScheduledTask, TaskStore
 from search_engine import SearchEngine
 from strings import get_string, next_language
+from tray_daemon import JugnuTrayIcon
 from tts import RATE_MAX, RATE_MIN, TTSManager
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -506,6 +509,20 @@ class JugnuWindow(QMainWindow):
         self.tasks = []  # background requests that are still running
         self.closed = False
 
+        task_file = os.path.join(os.path.dirname(self.settings_file), core.TASKS_FILE) if os.path.dirname(self.settings_file) else core.TASKS_FILE
+        self.task_store = TaskStore(task_file)
+        self.scheduler = BackgroundScheduler(self.task_store, check_interval=5.0, executor_fn=self._execute_scheduled_task)
+        self.scheduler.on_task_finished = self.on_scheduled_task_finished
+        self.scheduler.start()
+        self.automation_dialog = None
+        self.tray_icon = None
+        try:
+            if QSystemTrayIcon.isSystemTrayAvailable():
+                self.tray_icon = JugnuTrayIcon(self, self.scheduler)
+                self.tray_icon.show()
+        except Exception:
+            self.tray_icon = None
+
         self.build_ui()
         if self.chats:
             self.current_id = self.chats[-1]["id"]  # Reopen most recent saved conversation.
@@ -588,6 +605,12 @@ class JugnuWindow(QMainWindow):
         self.persona_btn.setFixedWidth(36)
         self.persona_btn.clicked.connect(self.open_persona_manager)
         head.addWidget(self.persona_btn)
+
+        self.auto_btn = QPushButton("⏱  Tasks", objectName="autoBtn")
+        self.auto_btn.setCursor(Qt.PointingHandCursor)
+        self.auto_btn.clicked.connect(self.open_automation_dialog)
+        head.addWidget(self.auto_btn)
+        QShortcut(QKeySequence("Ctrl+Shift+A"), self, self.open_automation_dialog)
         # Shown only while speech is playing (see poll_speech).
         self.stop_btn = QPushButton("⏹  Stop")
         self.stop_btn.setProperty("variant", "stop")
@@ -716,6 +739,7 @@ class JugnuWindow(QMainWindow):
         self.language_btn.setText(self.t("language_btn", name=self.t("language_name")))
         self.theme_btn.setText(self.theme_button_text())
         self.header_title.setText(self.t("header_title"))
+        self.auto_btn.setText(self.t("auto_btn"))
         self.send_btn.setText(self.t("send_btn"))
         if self.voice_dialog is not None:
             self.voice_dialog.retranslate()
@@ -839,6 +863,63 @@ class JugnuWindow(QMainWindow):
         self.persona_dialog.show()
         self.persona_dialog.raise_()
         self.persona_dialog.activateWindow()
+
+    def open_automation_dialog(self):
+        if getattr(self, "automation_dialog", None) is None:
+            self.automation_dialog = AutomationDialog(self, self.task_store, self.scheduler)
+        self.automation_dialog.show()
+        self.automation_dialog.raise_()
+        self.automation_dialog.activateWindow()
+
+    def restore_from_tray(self):
+        """Restore window when triggered from system tray."""
+        if self.isMinimized():
+            self.showNormal()
+        self.show()
+        self.raise_()
+        self.activateWindow()
+
+    def _execute_scheduled_task(self, task):
+        chat = {
+            "messages": [{"role": "user", "content": task.prompt}],
+            "persona": task.persona or "default",
+        }
+        answer, is_error = core.ask_ollama(chat, self.language, persona=task.persona)
+        return answer, is_error
+
+    def on_scheduled_task_finished(self, task, answer, is_error):
+        def handle():
+            try:
+                if self.closed:
+                    return
+                time_now = core.message_time_text()
+                target = None
+                if task.target_chat_id:
+                    target = self.find_chat(task.target_chat_id)
+                if not target:
+                    target = next((c for c in self.chats if c.get("title") == "Automated Tasks"), None)
+                    if not target:
+                        target = core.new_chat()
+                        target["title"] = "Automated Tasks"
+                        self.chats.append(target)
+                target["messages"].append({
+                    "role": "user",
+                    "content": f"⏰ [Scheduled: {task.title}]\n{task.prompt}",
+                    "time": time_now,
+                })
+                bot_msg = {"role": "assistant", "content": answer, "time": time_now}
+                if is_error:
+                    bot_msg["is_error"] = True
+                target["messages"].append(bot_msg)
+                self.save_history()
+                self.refresh_history_list()
+                if self.current_id == target.get("id"):
+                    self.display_chat()
+                if hasattr(self, "automation_dialog") and self.automation_dialog:
+                    self.automation_dialog.populate_tasks(select_id=task.id)
+            except Exception:
+                pass
+        QTimer.singleShot(0, handle)
 
     # ---------- Chats ----------
     def make_draft(self):
@@ -1414,6 +1495,10 @@ class JugnuWindow(QMainWindow):
         self.closed = True
         self.speech_timer.stop()
         self.tts.shutdown()
+        if hasattr(self, "scheduler") and self.scheduler:
+            self.scheduler.stop(timeout=1.0)
+        if hasattr(self, "tray_icon") and self.tray_icon:
+            self.tray_icon.hide()
         super().closeEvent(event)
 
 
