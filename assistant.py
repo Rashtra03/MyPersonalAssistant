@@ -4,6 +4,7 @@ Only the terminal screen lives here: the greeting, the commands, and the wording
 of the messages. Everything shared with the desktop app (the model, the clock, the
 calculator and the request to Ollama) comes from core.py.
 """
+import argparse
 import json
 from pathlib import Path
 
@@ -16,6 +17,12 @@ from core import (
     chat,
     is_time_question,
     local_now,
+)
+from context_ingest import (
+    AttachedDocument,
+    AttachmentError,
+    assemble_prompt_with_attachments,
+    ingest_file,
 )
 from export_manager import export_chat
 from personas import get_persona, list_personas
@@ -76,13 +83,18 @@ def get_date():
 
 # ---------------- AI CHAT ----------------
 
-def ask_ai(user_message, persona=None):
+def ask_ai(user_message, persona=None, attachments=None):
     if isinstance(persona, str):
         persona = get_persona(persona)
     system_prompt = (persona.system_prompt + "\n\n") if persona and getattr(persona, "system_prompt", None) else SYSTEM_PROMPT
     options = {"temperature": persona.temperature} if persona and hasattr(persona, "temperature") else None
+    prompt_text = (
+        assemble_prompt_with_attachments(user_message, attachments)
+        if attachments
+        else user_message
+    )
     result = chat(
-        build_messages(system_prompt, [{"role": "user", "content": user_message}]),
+        build_messages(system_prompt, [{"role": "user", "content": prompt_text}]),
         options=options,
     )
 
@@ -125,25 +137,38 @@ def show_help():
     print("3. calculate <expr>      - Calculate a mathematical expression")
     print("4. personas              - List all available assistant personas")
     print("5. persona <name>        - Switch active persona (e.g. persona code)")
-    print("6. /search <query>       - Search across conversation history")
-    print("7. /export [id] <format> - Export chat to md, html, json, or txt")
-    print("8. /chats                - List all saved conversation history")
-    print("9. /schedule             - Manage proactive background tasks and cron jobs")
-    print("10. help                 - Show available commands")
-    print("11. bye                  - Exit the assistant")
+    print("6. /attach <path>        - Attach a local code or text file")
+    print("7. /files                - List attached files")
+    print("8. /detach               - Clear all attachments")
+    print("9. /search <query>       - Search across conversation history")
+    print("10. /export [id] <format> - Export chat to md, html, json, or txt")
+    print("11. /chats               - List all saved conversation history")
+    print("12. /schedule            - Manage proactive background tasks and cron jobs")
+    print("13. help                 - Show available commands")
+    print("14. bye                  - Exit the assistant")
     print("\nYou can also ask any general question.")
 
 
 # ---------------- MAIN ASSISTANT ----------------
 
-def run_assistant(persona_name="default"):
+def run_assistant(persona_name="default", initial_files=None):
     active_persona = get_persona(persona_name)
+    active_attachments: list[AttachedDocument] = []
+    if initial_files:
+        for file_path in initial_files:
+            try:
+                doc = ingest_file(file_path)
+                active_attachments.append(doc)
+                print(f"[Attached: {doc.filename} ({doc.formatted_size})]")
+            except AttachmentError as err:
+                print(f"[Attachment error: {err}]")
     greet()
     if active_persona and active_persona.id != "default":
         print(f"Active Persona: {active_persona.display_label} (temp: {active_persona.temperature})")
 
     while True:
-        user_input = input("\nYou: ").strip()
+        prompt_prefix = f"\nYou ({len(active_attachments)} attached): " if active_attachments else "\nYou: "
+        user_input = input(prompt_prefix).strip()
 
         if not user_input:
             continue
@@ -193,6 +218,36 @@ def run_assistant(persona_name="default"):
         elif command.startswith("calculate "):
             expression = user_input[10:].strip()
             print("\nAssistant:", calculate(expression))
+
+        # Attach local file
+        elif command.startswith("/attach ") or command.startswith("/file "):
+            parts = user_input.split(maxsplit=1)
+            target = parts[1].strip() if len(parts) > 1 else ""
+            if not target:
+                print("\nAssistant: Please provide a file path, e.g. /attach path/to/file.py")
+            else:
+                try:
+                    doc = ingest_file(target)
+                    active_attachments.append(doc)
+                    print(f"\nAssistant: Attached '{doc.filename}' ({doc.formatted_size}, {doc.language}).")
+                except AttachmentError as err:
+                    print(f"\nAssistant: Could not attach file: {err}")
+
+        # List attached files
+        elif command in ["/files", "/attachments"]:
+            if not active_attachments:
+                print("\nAssistant: No files attached.")
+            else:
+                print("\nAttached files:")
+                for idx, doc in enumerate(active_attachments, 1):
+                    trunc = " (truncated)" if doc.is_truncated else ""
+                    print(f"{idx}. {doc.filename} ({doc.formatted_size}, {doc.language}){trunc}")
+
+        # Detach all attachments
+        elif command in ["/detach", "/clear-attachments"]:
+            count = len(active_attachments)
+            active_attachments.clear()
+            print(f"\nAssistant: Cleared {count} attached file(s).")
 
         # Search conversations
         elif command.startswith("/search"):
@@ -350,8 +405,9 @@ def run_assistant(persona_name="default"):
         # General AI question
         else:
             print("\nAssistant: ", end="", flush=True)
-            answer = ask_ai(user_input, persona=active_persona)
+            answer = ask_ai(user_input, persona=active_persona, attachments=active_attachments)
             print(answer)
+            active_attachments.clear()
 
 
 # ---------------- START ----------------
@@ -360,5 +416,6 @@ if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser(description="JUGNU CLI Assistant")
     parser.add_argument("--persona", default="default", help="Initial persona (default, code, creative, tutor, concise)")
+    parser.add_argument("--file", "-f", action="append", help="Path to local file to attach")
     cli_args, _ = parser.parse_known_args()
-    run_assistant(persona_name=cli_args.persona)
+    run_assistant(persona_name=cli_args.persona, initial_files=cli_args.file)
