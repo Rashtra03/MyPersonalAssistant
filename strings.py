@@ -92,6 +92,13 @@ STRINGS = {
         "auto_task_resume": "Resume Scheduler",
         "auto_notify_success": "Task “{name}” completed successfully.",
         "auto_notify_error": "Task “{name}” failed: {error}",
+        # Document Attachment and Ingestion
+        "attach_file_btn": "📎 Attach",
+        "attach_dialog_title": "Select Document or Code File",
+        "attach_error_title": "Attachment Error",
+        "attach_err_binary": "Cannot attach binary file: {filename}",
+        "attach_err_large": "File too large: {filename} ({size}). Limit is 512 KB.",
+        "attach_err_read": "Could not read file: {error}",
         # Model switcher and pull manager
         "model_btn": "🧠 {name}",
         "model_menu_title": "Local Models",
@@ -205,6 +212,13 @@ STRINGS = {
         "auto_task_resume": "Scheduler Shuru Karo",
         "auto_notify_success": "Task “{name}” safaltapoorvak pura ho gaya.",
         "auto_notify_error": "Task “{name}” fail ho gaya: {error}",
+        # Document Attachment and Ingestion
+        "attach_file_btn": "📎 Jodein",
+        "attach_dialog_title": "Document ya Code File Chunein",
+        "attach_error_title": "Attachment Error",
+        "attach_err_binary": "Binary file attach nahi kar sakte: {filename}",
+        "attach_err_large": "File bahut badi hai: {filename} ({size}). Limit 512 KB hai.",
+        "attach_err_read": "File read nahi ho saki: {error}",
         # Model switcher and pull manager
         "model_btn": "🧠 {name}",
         "model_menu_title": "Local Models",
