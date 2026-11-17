@@ -252,6 +252,11 @@ def load_performance_hud(path=SETTINGS_FILE):
     return bool(_read_settings(path).get("show_performance_hud", True))
 
 
+def load_model_setting(path=SETTINGS_FILE):
+    model = _read_settings(path).get("default_model")
+    return model if isinstance(model, str) and model.strip() else MODEL
+
+
 def save_settings(path=SETTINGS_FILE, **settings):
     try:
         with open(path, "w", encoding="utf-8") as f:
@@ -357,7 +362,7 @@ class OllamaReply(tuple):
         return instance
 
 
-def ask_ollama(chat, language, persona=None):
+def ask_ollama(chat, language, persona=None, model=None):
     """Ask the model for the next reply in `chat`. Blocks; returns (answer, is_error) and never raises."""
     if persona is None and isinstance(chat, dict) and chat.get("persona"):
         try:
@@ -367,8 +372,9 @@ def ask_ollama(chat, language, persona=None):
             persona = None
     temp = persona.temperature if persona and hasattr(persona, "temperature") else 0.6
     try:
+        chosen_model = model or chat.get("model") or MODEL
         response = requests.post(OLLAMA_URL, json={
-            "model": MODEL,
+            "model": chosen_model,
             "messages": model_messages(chat, language, persona=persona),
             "stream": False,
             "keep_alive": "10m",
