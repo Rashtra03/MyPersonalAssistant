@@ -324,7 +324,8 @@ def test_bubble_hud_badge_hidden_when_disabled(qtbot, make_window):
 def test_first_message_triggers_heuristic_titling(qtbot, make_window):
     app = make_window([])
     app.input_box.setPlainText("Can you please explain recursion in python?")
-    app.send_message()
+    with patch.object(app, "ask_ollama"):
+        app.send_message()
     chat = app.current_chat()
     assert chat["title"] == "Recursion In Python"
 
