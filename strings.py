@@ -227,6 +227,14 @@ STRINGS = {
         "auto_task_resume": "Resume Scheduler",
         "auto_notify_success": "Task “{name}” completed successfully.",
         "auto_notify_error": "Task “{name}” failed: {error}",
+        # Analytics and HUD
+        "hud_dialog_title": "Inference Performance Details",
+        "hud_speed": "Generation Speed",
+        "hud_tokens": "Tokens Generated",
+        "hud_total_time": "Total Response Time",
+        "hud_ttft": "Time to First Token (TTFT)",
+        "hud_model": "Model",
+        "hud_badge_tooltip": "Click to inspect latency and throughput metrics",
         # Command Palette and Shortcuts
         "command_palette_btn": "⌘  Command Palette (Ctrl+K)",
         "command_palette_title": "Command Palette",
@@ -506,6 +514,14 @@ STRINGS = {
         "auto_task_resume": "Scheduler Shuru Karo",
         "auto_notify_success": "Task “{name}” safaltapoorvak pura ho gaya.",
         "auto_notify_error": "Task “{name}” fail ho gaya: {error}",
+        # Analytics and HUD
+        "hud_dialog_title": "Inference Performance Jankari",
+        "hud_speed": "Generation Speed",
+        "hud_tokens": "Tokens Generated",
+        "hud_total_time": "Kul Response Samay",
+        "hud_ttft": "Pahla Token Samay (TTFT)",
+        "hud_model": "Model",
+        "hud_badge_tooltip": "Latency aur throughput metrics dekhne ke liye click karein",
         # Command Palette and Shortcuts
         "command_palette_btn": "⌘  Command Palette (Ctrl+K)",
         "command_palette_title": "Command Palette",
