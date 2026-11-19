@@ -141,6 +141,7 @@ from markdown_render import render_markdown, plain_text
 from exporter import (
     ConversationExporter, extract_chat_metadata, sanitize_filename
 )
+from personas import Persona, PersonaManager, BUILTIN_PERSONAS
 
 APP_TITLE = "JUGNU | Just an Unusually Genius Neural Utility"
 HISTORY_FILE = "jugnu_history.json"
@@ -498,6 +499,7 @@ class JugnuApp:
         self.bind_hotkeys()
         if self.chats:
             self.current_id = self.chats[-1]["id"]  # Reopen most recent saved conversation.
+            self.current_persona_id = self.chats[-1].get("persona_id", "default")
         else:
             self.make_draft()
         self.apply_language()
@@ -1713,6 +1715,7 @@ class JugnuWindow(QMainWindow):
                                     selectbackground=c["accent"], selectforeground="white")
         for btn in [self.new_btn, self.theme_btn, self.voice_btn, self.language_btn,
                     self.voice_settings_btn, self.persona_studio_btn, self.vault_btn, self.arena_btn]:
+                    self.voice_settings_btn, self.persona_studio_btn]:
         self.history_list.configure(bg=c["sidebar"], fg=c["text"],
                                     selectbackground=c["accent"], selectforeground="white")
         for btn in [self.new_btn, self.theme_btn, self.voice_btn, self.language_btn,
