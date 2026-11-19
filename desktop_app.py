@@ -45,6 +45,7 @@ from markdown_render import render_markdown, plain_text
 from exporter import (
     ConversationExporter, extract_chat_metadata, sanitize_filename
 )
+from personas import Persona, PersonaManager, BUILTIN_PERSONAS
 
 APP_TITLE = "JUGNU | Just an Unusually Genius Neural Utility"
 HISTORY_FILE = "jugnu_history.json"
@@ -380,15 +381,20 @@ class JugnuApp:
         self.bubble_items = []
         self._resize_timer = None
         self.canvas_width = None
+        self.persona_manager = PersonaManager()
+        self.current_persona_id = "default"
+        self.persona_win = None
 
         self.build_ui()
         self.bind_hotkeys()
         if self.chats:
             self.current_id = self.chats[-1]["id"]  # Reopen most recent saved conversation.
+            self.current_persona_id = self.chats[-1].get("persona_id", "default")
         else:
             self.make_draft()
         self.apply_language()
         self.apply_theme()
+        self.update_persona_ui()
         self.root.after(250, self.warm_up)
         self.poll_speech()
         self.poll_stt()
@@ -1090,6 +1096,9 @@ class JugnuWindow(QMainWindow):
         self.voice_settings_btn.pack(fill="x", padx=12, pady=(0, 8))
         if not (self.tts.available or self.stt.has_mic or self.stt.has_recognizer):
             self.voice_settings_btn.configure(state="disabled")
+        self.persona_studio_btn = Button(self.sidebar, command=self.open_persona_studio,
+                                         relief="flat", pady=10)
+        self.persona_studio_btn.pack(fill="x", padx=12, pady=(0, 8))
         self.language_btn = Button(self.sidebar, command=self.toggle_language,
                                       relief="flat", pady=10)
         self.language_btn.pack(fill="x", padx=12, pady=(0, 8))
@@ -1112,6 +1121,9 @@ class JugnuWindow(QMainWindow):
         self.export_btn = Button(self.header, command=self.open_export_dialog,
                                  relief="flat", font=("Segoe UI", 9, "bold"), padx=12, pady=4)
         self.export_btn.pack(side="right", padx=(0, 8), pady=14)
+        self.persona_header_btn = Button(self.header, command=self.show_persona_quick_menu,
+                                         relief="flat", font=("Segoe UI", 9, "bold"), padx=12, pady=4)
+        self.persona_header_btn.pack(side="right", padx=(0, 8), pady=14)
         # Shown only while speech is playing (see poll_speech); packed after status, so it sits left of it.
         self.stop_btn = Button(self.header, text="⏹  Stop", command=self.stop_speaking,
                                   relief="flat", font=("Segoe UI", 9, "bold"), padx=12, pady=4)
@@ -1551,6 +1563,12 @@ class JugnuWindow(QMainWindow):
                                 activeforeground=c["accent2"], cursor="hand2")
         self.export_btn.configure(bg=c["accent2"], fg="white", activebackground=c["accent"],
                                   activeforeground="white", cursor="hand2")
+        self.persona_header_btn.configure(bg=c["panel"], fg=c["text"], activebackground=c["border"],
+                                          activeforeground=c["text"], cursor="hand2")
+        self.history_list.configure(bg=c["sidebar"], fg=c["text"],
+                                    selectbackground=c["accent"], selectforeground="white")
+        for btn in [self.new_btn, self.theme_btn, self.voice_btn, self.language_btn,
+                    self.voice_settings_btn, self.persona_studio_btn]:
         self.history_list.configure(bg=c["sidebar"], fg=c["text"],
                                     selectbackground=c["accent"], selectforeground="white")
         for btn in [self.new_btn, self.theme_btn, self.voice_btn, self.language_btn,
@@ -1979,6 +1997,10 @@ class JugnuWindow(QMainWindow):
         self.root.bind("<Control-E>", lambda _e: self.open_export_dialog())
         self.root.bind("<Control-Shift-e>", lambda _e: self.open_export_dialog())
         self.root.bind("<Control-Shift-E>", lambda _e: self.open_export_dialog())
+        self.root.bind("<Control-p>", lambda _e: self.open_persona_studio())
+        self.root.bind("<Control-P>", lambda _e: self.open_persona_studio())
+        self.root.bind("<Control-Shift-p>", lambda _e: self.open_persona_studio())
+        self.root.bind("<Control-Shift-P>", lambda _e: self.open_persona_studio())
 
     def mic_button_text(self):
         if self.stt.is_listening:
@@ -2136,6 +2158,9 @@ class JugnuWindow(QMainWindow):
         self.clear_btn.configure(text=self.t("clear_chat_btn"))
         self.voice_btn.configure(text=self.voice_button_text())
         self.voice_settings_btn.configure(text=self.t("voice_settings_btn"))
+        self.persona_studio_btn.configure(text=self.t("persona_studio_btn"))
+        self.update_voice_window()
+        self.update_persona_ui()
         self.update_voice_window()
         self.language_btn.configure(text=self.t("language_btn", name=self.t("language_name")))
         self.theme_btn.configure(text=self.theme_button_text())
@@ -2176,6 +2201,11 @@ class JugnuWindow(QMainWindow):
             else:
                 self.history_label.setText(self.t("search_no_matches"))
 
+    def make_draft(self):
+        self.draft_chat = {"id": str(uuid.uuid4()), "title": "New Chat", "messages": [],
+                           "persona_id": self.current_persona_id}
+        self.current_id = self.draft_chat["id"]
+        self.update_persona_ui()
         for chat in chats_to_show:  # newest first or ranked by search
             item = QListWidgetItem(core.list_title(chat.get("title", core.NEW_CHAT_TITLE)))
             item.setData(Qt.UserRole, chat["id"])
@@ -2201,6 +2231,8 @@ class JugnuWindow(QMainWindow):
             self.tts.stop()
             self.current_id = chat_id
             self.draft_chat = None
+            self.current_persona_id = self.chats[index].get("persona_id", "default")
+            self.update_persona_ui()
             self.display_chat()
 
     def show_chat_menu(self, pos):
@@ -2227,6 +2259,8 @@ class JugnuWindow(QMainWindow):
         # The menu remembers the chat's id (not its row), so it acts on the chat that was clicked.
         menu.add_command(label=self.t("chat_menu_export"),
                          command=lambda cid=chat["id"]: self.open_export_dialog(cid))
+        menu.add_command(label="🎭  " + self.t("persona_studio_btn"),
+                         command=self.open_persona_studio)
         menu.add_separator()
         menu.add_command(label=self.t("chat_menu_rename"),
                          command=lambda cid=chat["id"]: self.rename_chat(cid))
@@ -2596,6 +2630,490 @@ class JugnuWindow(QMainWindow):
             win.grab_set()
         except tk.TclError:
             pass
+        return win
+
+    # ---------- Persona Studio & Custom AI Personas ----------
+    def update_persona_ui(self):
+        chat = self.current_chat()
+        pid = chat.get("persona_id", self.current_persona_id) if chat else self.current_persona_id
+        persona = self.persona_manager.get_persona(pid)
+        if hasattr(self, "persona_header_btn") and self.persona_header_btn.winfo_exists():
+            self.persona_header_btn.configure(text=f"{persona.avatar}  {persona.name} ▾")
+
+    def set_persona_for_current_chat(self, persona_id):
+        self.current_persona_id = persona_id
+        chat = self.current_chat()
+        if chat:
+            chat["persona_id"] = persona_id
+            self.save_history()
+        self.update_persona_ui()
+
+    def show_persona_quick_menu(self, _event=None):
+        c = self.colors
+        menu = tk.Menu(self.root, tearoff=0, bg=c["panel"], fg=c["text"],
+                       activebackground=c["accent"], activeforeground="white")
+
+        chat = self.current_chat()
+        current_pid = chat.get("persona_id", self.current_persona_id) if chat else self.current_persona_id
+
+        for persona in self.persona_manager.list_personas():
+            prefix = "✓ " if persona.id == current_pid else "   "
+            label = f"{prefix}{persona.avatar}  {persona.name}"
+            menu.add_command(
+                label=label,
+                command=lambda pid=persona.id: self.set_persona_for_current_chat(pid)
+            )
+
+        menu.add_separator()
+        menu.add_command(
+            label="🎭  " + self.t("persona_studio_btn") + "…",
+            command=self.open_persona_studio
+        )
+
+        try:
+            x = self.persona_header_btn.winfo_rootx()
+            y = self.persona_header_btn.winfo_rooty() + self.persona_header_btn.winfo_height() + 2
+            menu.tk_popup(x, y)
+        finally:
+            menu.grab_release()
+
+    def open_persona_studio(self):
+        if self.persona_win is not None and self.persona_win.winfo_exists():
+            self.persona_win.lift()
+            self.persona_win.focus_set()
+            return self.persona_win
+
+        c = self.colors
+        win = tk.Toplevel(self.root)
+        win.title(self.t("persona_studio_title"))
+        win.configure(bg=c["bg"])
+        win.geometry("860x640")
+        win.minsize(780, 560)
+        win.transient(self.root)
+        self.persona_win = win
+
+        def on_close():
+            self.persona_win = None
+            win.destroy()
+
+        win.protocol("WM_DELETE_WINDOW", on_close)
+
+        chat = self.current_chat()
+        active_chat_pid = chat.get("persona_id", self.current_persona_id) if chat else self.current_persona_id
+        selected_pid = [active_chat_pid]
+
+        # Top Header
+        hdr = tk.Frame(win, bg=c["panel"], padx=20, pady=12)
+        hdr.pack(fill="x")
+        tk.Label(hdr, text=self.t("persona_studio_title"), font=("Segoe UI", 14, "bold"),
+                 bg=c["panel"], fg=c["text"], anchor="w").pack(fill="x")
+        tk.Label(hdr, text=self.t("persona_studio_subtitle"), font=("Segoe UI", 9),
+                 bg=c["panel"], fg=c["muted"], anchor="w").pack(fill="x", pady=(2, 0))
+
+        # Main Body Split: Left (List & Category) and Right (Editor)
+        body = tk.Frame(win, bg=c["bg"], padx=14, pady=12)
+        body.pack(fill="both", expand=True)
+
+        left_pane = tk.Frame(body, bg=c["bg"], width=270)
+        left_pane.pack(side="left", fill="both", padx=(0, 12))
+        left_pane.pack_propagate(False)
+
+        right_pane = tk.Frame(body, bg=c["panel"], padx=16, pady=14)
+        right_pane.pack(side="right", fill="both", expand=True)
+
+        # Category Filter
+        cat_frame = tk.Frame(left_pane, bg=c["bg"])
+        cat_frame.pack(fill="x", pady=(0, 8))
+        tk.Label(cat_frame, text=self.t("persona_category_label"), font=("Segoe UI", 9, "bold"),
+                 bg=c["bg"], fg=c["muted"]).pack(side="left")
+
+        cat_choice = tk.StringVar(value="All")
+        categories = ["All", "General", "Coding", "Writing", "Analysis", "Education", "Custom"]
+        cat_menu = tk.OptionMenu(cat_frame, cat_choice, *categories, command=lambda _c: refresh_list())
+        cat_menu.configure(bg=c["panel"], fg=c["text"], relief="flat", highlightthickness=0, font=("Segoe UI", 8))
+        cat_menu["menu"].configure(bg=c["panel"], fg=c["text"])
+        cat_menu.pack(side="right", fill="x", expand=True, padx=(6, 0))
+
+        # Listbox with Scrollbar
+        list_frame = tk.Frame(left_pane, bg=c["bg"])
+        list_frame.pack(fill="both", expand=True)
+
+        scroll = tk.Scrollbar(list_frame, orient="vertical")
+        persona_listbox = tk.Listbox(list_frame, relief="flat", borderwidth=0,
+                                     font=("Segoe UI", 9), activestyle="none",
+                                     bg=c["panel"], fg=c["text"],
+                                     selectbackground=c["accent"], selectforeground="white",
+                                     yscrollcommand=scroll.set)
+        scroll.configure(command=persona_listbox.yview)
+        scroll.pack(side="right", fill="y")
+        persona_listbox.pack(side="left", fill="both", expand=True)
+
+        # Toolbar below list
+        tool_frame = tk.Frame(left_pane, bg=c["bg"])
+        tool_frame.pack(fill="x", pady=(10, 0))
+
+        btn_new = Button(tool_frame, text=self.t("persona_new_btn"), command=lambda: start_new_persona(),
+                         relief="flat", bg=c["accent"], fg="white", activebackground=c["accent2"],
+                         activeforeground="white", cursor="hand2", font=("Segoe UI", 8, "bold"), pady=5)
+        btn_new.pack(side="left", fill="x", expand=True, padx=(0, 4))
+
+        btn_imp = Button(tool_frame, text=self.t("persona_import_btn"), command=lambda: do_import(),
+                         relief="flat", bg=c["panel"], fg=c["text"], activebackground=c["border"],
+                         activeforeground=c["text"], cursor="hand2", font=("Segoe UI", 8), pady=5)
+        btn_imp.pack(side="left", fill="x", expand=True, padx=(0, 4))
+
+        btn_exp = Button(tool_frame, text=self.t("persona_export_btn"), command=lambda: do_export(),
+                         relief="flat", bg=c["panel"], fg=c["text"], activebackground=c["border"],
+                         activeforeground=c["text"], cursor="hand2", font=("Segoe UI", 8), pady=5)
+        btn_exp.pack(side="left", fill="x", expand=True)
+
+        # --- RIGHT PANE ---
+        top_row = tk.Frame(right_pane, bg=c["panel"])
+        top_row.pack(fill="x", pady=(0, 6))
+
+        av_box = tk.Frame(top_row, bg=c["panel"])
+        av_box.pack(side="left", padx=(0, 8))
+        tk.Label(av_box, text=self.t("persona_avatar_label"), font=("Segoe UI", 8, "bold"),
+                 bg=c["panel"], fg=c["muted"], anchor="w").pack(fill="x")
+        av_entry = tk.Entry(av_box, width=5, font=("Segoe UI", 12), relief="flat",
+                            bg=c["entry"], fg=c["text"], justify="center", insertbackground=c["text"])
+        av_entry.pack(fill="x", ipady=3)
+
+        name_box = tk.Frame(top_row, bg=c["panel"])
+        name_box.pack(side="left", fill="x", expand=True, padx=(0, 8))
+        tk.Label(name_box, text=self.t("persona_name_label"), font=("Segoe UI", 8, "bold"),
+                 bg=c["panel"], fg=c["muted"], anchor="w").pack(fill="x")
+        name_entry = tk.Entry(name_box, font=("Segoe UI", 10), relief="flat",
+                              bg=c["entry"], fg=c["text"], insertbackground=c["text"])
+        name_entry.pack(fill="x", ipady=3)
+
+        cat_box = tk.Frame(top_row, bg=c["panel"], width=120)
+        cat_box.pack(side="left", padx=(0, 4))
+        tk.Label(cat_box, text=self.t("persona_category_label"), font=("Segoe UI", 8, "bold"),
+                 bg=c["panel"], fg=c["muted"], anchor="w").pack(fill="x")
+        edit_cat_var = tk.StringVar(value="General")
+        edit_cat_menu = tk.OptionMenu(cat_box, edit_cat_var, *categories[1:])
+        edit_cat_menu.configure(bg=c["entry"], fg=c["text"], relief="flat", highlightthickness=0, font=("Segoe UI", 8))
+        edit_cat_menu["menu"].configure(bg=c["panel"], fg=c["text"])
+        edit_cat_menu.pack(fill="x", ipady=1)
+
+        # Badges row
+        badge_frame = tk.Frame(right_pane, bg=c["panel"])
+        badge_frame.pack(fill="x", pady=(0, 8))
+        lbl_type_badge = tk.Label(badge_frame, font=("Segoe UI", 8, "bold"), padx=8, pady=2)
+        lbl_type_badge.pack(side="left", padx=(0, 6))
+        lbl_active_badge = tk.Label(badge_frame, text="● " + self.t("persona_active_badge"),
+                                    font=("Segoe UI", 8, "bold"), bg="#10B981", fg="white", padx=8, pady=2)
+
+        # Description
+        tk.Label(right_pane, text=self.t("persona_desc_label"), font=("Segoe UI", 8, "bold"),
+                 bg=c["panel"], fg=c["muted"], anchor="w").pack(fill="x", pady=(2, 2))
+        desc_entry = tk.Entry(right_pane, font=("Segoe UI", 9), relief="flat",
+                              bg=c["entry"], fg=c["text"], insertbackground=c["text"])
+        desc_entry.pack(fill="x", ipady=3, pady=(0, 8))
+
+        # System Prompt
+        tk.Label(right_pane, text=self.t("persona_prompt_label"), font=("Segoe UI", 8, "bold"),
+                 bg=c["panel"], fg=c["muted"], anchor="w").pack(fill="x", pady=(0, 2))
+
+        prompt_frame = tk.Frame(right_pane, bg=c["panel"])
+        prompt_frame.pack(fill="both", expand=True, pady=(0, 8))
+        prompt_scroll = tk.Scrollbar(prompt_frame, orient="vertical")
+        prompt_text = tk.Text(prompt_frame, wrap="word", font=("Segoe UI", 9), relief="flat",
+                              bg=c["entry"], fg=c["text"], insertbackground=c["text"],
+                              yscrollcommand=prompt_scroll.set, height=6)
+        prompt_scroll.configure(command=prompt_text.yview)
+        prompt_scroll.pack(side="right", fill="y")
+        prompt_text.pack(side="left", fill="both", expand=True)
+
+        # Model Options
+        opts_row = tk.Frame(right_pane, bg=c["panel"])
+        opts_row.pack(fill="x", pady=(0, 8))
+
+        temp_frame = tk.Frame(opts_row, bg=c["panel"])
+        temp_frame.pack(side="left", fill="x", expand=True, padx=(0, 12))
+        lbl_temp = tk.Label(temp_frame, font=("Segoe UI", 8, "bold"), bg=c["panel"], fg=c["muted"], anchor="w")
+        lbl_temp.pack(fill="x")
+        temp_scale = tk.Scale(temp_frame, from_=0.0, to=1.5, resolution=0.05, orient="horizontal",
+                              showvalue=False, highlightthickness=0, bd=0, bg=c["panel"],
+                              command=lambda val: lbl_temp.configure(text=self.t("persona_temp_label", value=f"{float(val):.2f}")))
+        temp_scale.pack(fill="x")
+
+        ctx_frame = tk.Frame(opts_row, bg=c["panel"], width=130)
+        ctx_frame.pack(side="right")
+        tk.Label(ctx_frame, text="Context (Tokens):", font=("Segoe UI", 8, "bold"),
+                 bg=c["panel"], fg=c["muted"], anchor="w").pack(fill="x")
+        ctx_entry = tk.Entry(ctx_frame, width=12, font=("Segoe UI", 9), relief="flat",
+                             bg=c["entry"], fg=c["text"], insertbackground=c["text"])
+        ctx_entry.pack(fill="x", ipady=3)
+
+        # Action Buttons
+        act_row = tk.Frame(right_pane, bg=c["panel"])
+        act_row.pack(fill="x", pady=(6, 0))
+
+        btn_use = Button(act_row, text=self.t("persona_use_btn"), command=lambda: apply_to_chat(),
+                         relief="flat", bg=c["accent"], fg="white", activebackground=c["accent2"],
+                         activeforeground="white", cursor="hand2", font=("Segoe UI", 9, "bold"), padx=12, pady=6)
+        btn_use.pack(side="left", padx=(0, 8))
+
+        btn_save = Button(act_row, text=self.t("persona_save_btn"), command=lambda: save_current_persona(),
+                          relief="flat", bg=c["accent2"], fg="white", activebackground=c["accent"],
+                          activeforeground="white", cursor="hand2", font=("Segoe UI", 9, "bold"), padx=12, pady=6)
+        btn_save.pack(side="left", padx=(0, 8))
+
+        btn_clone = Button(act_row, text=self.t("persona_clone_btn"), command=lambda: clone_current_persona(),
+                           relief="flat", bg=c["border"], fg=c["text"], activebackground=c["accent"],
+                           activeforeground="white", cursor="hand2", font=("Segoe UI", 9), padx=10, pady=6)
+        btn_clone.pack(side="left", padx=(0, 8))
+
+        btn_del = Button(act_row, text=self.t("persona_delete_btn"), command=lambda: delete_current_persona(),
+                         relief="flat", bg=c["danger"], fg=c["accent2"], activebackground=c["danger"],
+                         activeforeground=c["text"], cursor="hand2", font=("Segoe UI", 9), padx=10, pady=6)
+        btn_del.pack(side="right")
+
+        # Bottom Frame
+        bot_frame = tk.Frame(win, bg=c["bg"], padx=16, pady=10)
+        bot_frame.pack(fill="x")
+        Button(bot_frame, text=self.t("persona_close_btn"), command=on_close,
+               relief="flat", bg=c["panel"], fg=c["text"], activebackground=c["border"],
+               activeforeground=c["text"], cursor="hand2", padx=16, pady=5).pack(side="right")
+
+        # Display and State Logic
+        current_displayed_personas = []
+
+        def load_persona(p: Persona):
+            selected_pid[0] = p.id
+            av_entry.delete(0, "end")
+            av_entry.insert(0, p.avatar)
+
+            name_entry.delete(0, "end")
+            name_entry.insert(0, p.name)
+
+            edit_cat_var.set(p.category if p.category in categories[1:] else "General")
+
+            desc_entry.delete(0, "end")
+            desc_entry.insert(0, p.description)
+
+            prompt_text.configure(state="normal")
+            prompt_text.delete("1.0", "end")
+            prompt_text.insert("1.0", p.system_prompt)
+
+            temp_scale.set(p.temperature)
+            lbl_temp.configure(text=self.t("persona_temp_label", value=f"{p.temperature:.2f}"))
+
+            ctx_entry.delete(0, "end")
+            if p.num_ctx:
+                ctx_entry.insert(0, str(p.num_ctx))
+
+            # Status Badges
+            if p.is_builtin:
+                lbl_type_badge.configure(text=self.t("persona_builtin_badge"), bg="#4B5563", fg="white")
+                btn_save.configure(state="disabled")
+                btn_del.configure(state="disabled")
+                prompt_text.configure(state="disabled")
+                name_entry.configure(state="disabled")
+                av_entry.configure(state="disabled")
+                desc_entry.configure(state="disabled")
+            else:
+                lbl_type_badge.configure(text=self.t("persona_custom_badge"), bg=c["accent"], fg="white")
+                btn_save.configure(state="normal")
+                btn_del.configure(state="normal")
+                prompt_text.configure(state="normal")
+                name_entry.configure(state="normal")
+                av_entry.configure(state="normal")
+                desc_entry.configure(state="normal")
+
+            # Active in Chat badge
+            current_active = self.current_chat().get("persona_id", self.current_persona_id) if self.current_chat() else self.current_persona_id
+            if p.id == current_active:
+                lbl_active_badge.pack(side="left")
+            else:
+                lbl_active_badge.pack_forget()
+
+        def refresh_list(select_id=None):
+            nonlocal current_displayed_personas
+            target_id = select_id or selected_pid[0]
+            cat = cat_choice.get()
+            current_displayed_personas = self.persona_manager.list_personas(category=cat)
+
+            persona_listbox.delete(0, "end")
+            sel_idx = 0
+            for idx, p in enumerate(current_displayed_personas):
+                badge = " (Custom)" if not p.is_builtin else ""
+                persona_listbox.insert("end", f"  {p.avatar}  {p.name}{badge}")
+                if p.id == target_id:
+                    sel_idx = idx
+
+            if current_displayed_personas:
+                persona_listbox.selection_clear(0, "end")
+                persona_listbox.selection_set(sel_idx)
+                persona_listbox.see(sel_idx)
+                load_persona(current_displayed_personas[sel_idx])
+
+        def on_list_select(_event=None):
+            selection = persona_listbox.curselection()
+            if selection and 0 <= selection[0] < len(current_displayed_personas):
+                load_persona(current_displayed_personas[selection[0]])
+
+        persona_listbox.bind("<<ListboxSelect>>", on_list_select)
+
+        def start_new_persona():
+            selected_pid[0] = "new"
+            av_entry.configure(state="normal")
+            av_entry.delete(0, "end")
+            av_entry.insert(0, "✨")
+
+            name_entry.configure(state="normal")
+            name_entry.delete(0, "end")
+            name_entry.insert(0, "New Custom Persona")
+
+            edit_cat_var.set("Custom")
+
+            desc_entry.configure(state="normal")
+            desc_entry.delete(0, "end")
+            desc_entry.insert(0, "Custom AI persona instructions and settings.")
+
+            prompt_text.configure(state="normal")
+            prompt_text.delete("1.0", "end")
+            prompt_text.insert("1.0", "You are an expert AI persona. Provide thoughtful, well-crafted responses.")
+
+            temp_scale.set(0.6)
+            ctx_entry.delete(0, "end")
+            ctx_entry.insert(0, "4096")
+
+            lbl_type_badge.configure(text=self.t("persona_custom_badge"), bg=c["accent"], fg="white")
+            lbl_active_badge.pack_forget()
+            btn_save.configure(state="normal")
+            btn_del.configure(state="disabled")
+
+        def save_current_persona():
+            name = name_entry.get().strip()
+            avatar = av_entry.get().strip() or "🤖"
+            cat = edit_cat_var.get().strip() or "General"
+            desc = desc_entry.get().strip()
+            prompt = prompt_text.get("1.0", "end").strip()
+            temp = temp_scale.get()
+            ctx_raw = ctx_entry.get().strip()
+            num_ctx = int(ctx_raw) if ctx_raw.isdigit() else None
+
+            if selected_pid[0] == "new":
+                new_p = Persona(
+                    id=f"custom_{uuid.uuid4().hex[:8]}",
+                    name=name,
+                    avatar=avatar,
+                    category=cat,
+                    description=desc,
+                    system_prompt=prompt,
+                    temperature=temp,
+                    num_ctx=num_ctx,
+                    is_builtin=False,
+                )
+                try:
+                    added = self.persona_manager.add_persona(new_p)
+                    refresh_list(select_id=added.id)
+                except Exception as ex:
+                    messagebox.showerror("Error", self.t("persona_validation_error", error=str(ex)), parent=win)
+            else:
+                updates = {
+                    "name": name,
+                    "avatar": avatar,
+                    "category": cat,
+                    "description": desc,
+                    "system_prompt": prompt,
+                    "temperature": temp,
+                    "num_ctx": num_ctx,
+                }
+                try:
+                    updated = self.persona_manager.update_persona(selected_pid[0], updates)
+                    refresh_list(select_id=updated.id)
+                except Exception as ex:
+                    messagebox.showerror("Error", self.t("persona_validation_error", error=str(ex)), parent=win)
+
+        def clone_current_persona():
+            try:
+                cloned = self.persona_manager.duplicate_persona(selected_pid[0])
+                refresh_list(select_id=cloned.id)
+            except Exception as ex:
+                messagebox.showerror("Error", str(ex), parent=win)
+
+        def delete_current_persona():
+            p = self.persona_manager.get_persona(selected_pid[0])
+            if p.is_builtin:
+                return
+            if not messagebox.askyesno(self.t("persona_delete_confirm_title"),
+                                       self.t("persona_delete_confirm_msg", name=p.name), parent=win):
+                return
+            self.persona_manager.delete_persona(selected_pid[0])
+            if self.current_persona_id == selected_pid[0]:
+                self.set_persona_for_current_chat("default")
+            refresh_list(select_id="default")
+
+        def apply_to_chat():
+            self.set_persona_for_current_chat(selected_pid[0])
+            p = self.persona_manager.get_persona(selected_pid[0])
+            lbl_active_badge.pack(side="left")
+            messagebox.showinfo(self.t("persona_studio_title"),
+                                self.t("persona_switched_notice", name=f"{p.avatar} {p.name}"), parent=win)
+
+        def do_import():
+            path = filedialog.askopenfilename(
+                parent=win,
+                title=self.t("persona_import_title"),
+                filetypes=[("JSON Files", "*.json"), ("All Files", "*.*")]
+            )
+            if not path:
+                return
+            count, errors = self.persona_manager.import_from_file(path)
+            if errors:
+                err_text = "\n".join(errors[:5])
+                messagebox.showwarning("Import Warning", self.t("persona_import_error", error=err_text), parent=win)
+            if count > 0:
+                messagebox.showinfo("Import Success", self.t("persona_import_success", count=count), parent=win)
+                refresh_list()
+
+        def do_export():
+            path = filedialog.asksaveasfilename(
+                parent=win,
+                title=self.t("persona_export_title"),
+                initialfile="jugnu_personas_export.json",
+                defaultextension=".json",
+                filetypes=[("JSON Files", "*.json"), ("All Files", "*.*")]
+            )
+            if not path:
+                return
+            try:
+                self.persona_manager.export_to_file(path)
+                messagebox.showinfo("Export Success", self.t("persona_export_success", path=path), parent=win)
+            except Exception as ex:
+                messagebox.showerror("Export Error", self.t("persona_export_error", error=str(ex)), parent=win)
+
+        # Store testable hooks on win
+        win.persona_listbox = persona_listbox
+        win.btn_use = btn_use
+        win.btn_save = btn_save
+        win.btn_clone = btn_clone
+        win.btn_del = btn_del
+        win.name_entry = name_entry
+        win.av_entry = av_entry
+        win.prompt_text = prompt_text
+        win.temp_scale = temp_scale
+        win.refresh_list = refresh_list
+        win.load_persona = load_persona
+        win.start_new_persona = start_new_persona
+        win.save_current_persona = save_current_persona
+        win.clone_current_persona = clone_current_persona
+        win.delete_current_persona = delete_current_persona
+        win.apply_to_chat = apply_to_chat
+
+        # Initial populate
+        refresh_list(select_id=active_chat_pid)
+
+        # Center on root
+        win.update_idletasks()
+        x = self.root.winfo_rootx() + (self.root.winfo_width() - win.winfo_reqwidth()) // 2
+        y = self.root.winfo_rooty() + (self.root.winfo_height() - win.winfo_reqheight()) // 3
+        win.geometry(f"+{max(x, 0)}+{max(y, 0)}")
+
         return win
 
     def clear_chat(self):
@@ -3134,6 +3652,37 @@ class JugnuWindow(QMainWindow):
             "model": (chat_doc.get("model") if chat_doc else None) or getattr(self, "current_model", DEFAULT_MODEL),
         }
         language = self.language  # The prompt and any error text use the language chosen at send time.
+        saved_chat = next((c for c in self.chats if c.get("id") == chat_id), None)
+        if not saved_chat:
+            # The conversation may have been cleared while the request was running.
+            self.root.after(0, lambda: self.finish_answer(None, chat_id))
+            return
+        persona_id = saved_chat.get("persona_id", self.current_persona_id)
+        persona = self.persona_manager.get_persona(persona_id)
+        sys_prompt = build_system_prompt(language, local_datetime_text(), persona_prompt=persona.system_prompt)
+        messages = build_messages(sys_prompt, saved_chat.get("messages", []))
+        # The request itself is shared with the command-line version (core.py); the wording
+        # of each failure below is this window's own, so it can be translated.
+        model_options = {"num_predict": 256, "temperature": persona.temperature}
+        if persona.num_ctx:
+            model_options["num_ctx"] = persona.num_ctx
+        result = ollama_chat(messages, timeout=180, keep_alive="10m",
+                             options=model_options)
+        is_error = True
+        if result.ok and result.answer:
+            answer, is_error = result.answer, False
+        elif result.ok:
+            answer = get_string(language, "error_empty_reply")
+        elif result.error == ERROR_INVALID:
+            answer = get_string(language, "error_invalid_response")
+        elif result.error == ERROR_TIMEOUT:
+            answer = get_string(language, "error_timeout")
+        elif result.error == ERROR_CONNECTION:
+            answer = get_string(language, "error_connection")
+        else:
+            answer = get_string(language, "error_generic", error=result.detail)
+        self.root.after(0, lambda: self.finish_answer(answer, chat_id, is_error=is_error))
+        self.start_task(lambda: (chat_id, *core.ask_ollama(chat, language)), self.on_answer)
         def work():
             reply = core.ask_ollama(chat, language)
             metrics = getattr(reply, "metrics", None)
