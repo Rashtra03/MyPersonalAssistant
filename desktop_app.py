@@ -1,5 +1,5 @@
 import tkinter as tk
-from tkinter import messagebox
+from tkinter import messagebox, filedialog
 from tkinter import font as tkfont
 import math
 import json
@@ -24,6 +24,9 @@ from stt import (
 )
 from history_lock import HistoryInUseError, HistoryLock
 from markdown_render import render_markdown, plain_text
+from exporter import (
+    ConversationExporter, extract_chat_metadata, sanitize_filename
+)
 
 APP_TITLE = "JUGNU | Just an Unusually Genius Neural Utility"
 HISTORY_FILE = "jugnu_history.json"
@@ -618,6 +621,9 @@ class JugnuApp:
         self.status = tk.Label(self.header, font=("Segoe UI", 9, "bold"),
                                anchor="e", padx=18)
         self.status.pack(side="right", fill="y")
+        self.export_btn = Button(self.header, command=self.open_export_dialog,
+                                 relief="flat", font=("Segoe UI", 9, "bold"), padx=12, pady=4)
+        self.export_btn.pack(side="right", padx=(0, 8), pady=14)
         # Shown only while speech is playing (see poll_speech); packed after status, so it sits left of it.
         self.stop_btn = Button(self.header, text="⏹  Stop", command=self.stop_speaking,
                                   relief="flat", font=("Segoe UI", 9, "bold"), padx=12, pady=4)
@@ -806,6 +812,8 @@ class JugnuApp:
         self.status.configure(bg=c["accent"], fg="#D1FAE5")
         self.stop_btn.configure(bg=c["accent2"], fg="white", activebackground=c["danger"],
                                 activeforeground=c["accent2"], cursor="hand2")
+        self.export_btn.configure(bg=c["accent2"], fg="white", activebackground=c["accent"],
+                                  activeforeground="white", cursor="hand2")
         self.history_list.configure(bg=c["sidebar"], fg=c["text"],
                                     selectbackground=c["accent"], selectforeground="white")
         for btn in [self.new_btn, self.theme_btn, self.voice_btn, self.language_btn,
@@ -1071,6 +1079,10 @@ class JugnuApp:
         self.root.bind("<Control-Shift-V>", lambda _e: self.toggle_dictation())
         self.root.bind("<Control-Shift-v>", lambda _e: self.toggle_dictation())
         self.root.bind("<Escape>", lambda _e: self.cancel_dictation())
+        self.root.bind("<Control-e>", lambda _e: self.open_export_dialog())
+        self.root.bind("<Control-E>", lambda _e: self.open_export_dialog())
+        self.root.bind("<Control-Shift-e>", lambda _e: self.open_export_dialog())
+        self.root.bind("<Control-Shift-E>", lambda _e: self.open_export_dialog())
 
     def mic_button_text(self):
         if self.stt.is_listening:
@@ -1225,6 +1237,7 @@ class JugnuApp:
         self.language_btn.configure(text=self.t("language_btn", name=self.t("language_name")))
         self.theme_btn.configure(text=self.theme_button_text())
         self.header_title.configure(text=self.t("header_title"))
+        self.export_btn.configure(text=self.t("export_btn"))
         self.send_btn.configure(text=self.t("send_btn"))
         self.mic_btn.configure(text=self.mic_button_text())
         self.waveform_hud.set_texts(
@@ -1304,6 +1317,9 @@ class JugnuApp:
         menu = tk.Menu(self.root, tearoff=0, bg=c["panel"], fg=c["text"],
                        activebackground=c["accent"], activeforeground="white")
         # The menu remembers the chat's id (not its row), so it acts on the chat that was clicked.
+        menu.add_command(label=self.t("chat_menu_export"),
+                         command=lambda cid=chat["id"]: self.open_export_dialog(cid))
+        menu.add_separator()
         menu.add_command(label=self.t("chat_menu_rename"),
                          command=lambda cid=chat["id"]: self.rename_chat(cid))
         menu.add_command(label=self.t("chat_menu_delete"),
@@ -1396,6 +1412,235 @@ class JugnuApp:
         entry.icursor("end")
         self.root.wait_window(win)
         return result["value"]
+
+    # ---------- Multi-Format Conversation Exporter ----------
+    def open_export_dialog(self, chat_id=None):
+        if chat_id is not None:
+            chat = self.find_chat(chat_id)
+        else:
+            chat = self.current_chat()
+
+        if not chat:
+            chat = {"id": "draft", "title": "New Chat", "messages": []}
+
+        meta = extract_chat_metadata(chat)
+        clean_title = sanitize_filename(meta["title"])
+        c = self.colors
+
+        win = tk.Toplevel(self.root)
+        win.title(self.t("export_dialog_title"))
+        win.configure(bg=c["bg"])
+        win.resizable(False, False)
+        win.transient(self.root)
+
+        # Header section
+        header_frame = tk.Frame(win, bg=c["panel"], padx=20, pady=16)
+        header_frame.pack(fill="x")
+
+        title_lbl = tk.Label(header_frame, text=self.t("export_dialog_title"),
+                             bg=c["panel"], fg=c["text"], font=("Segoe UI", 13, "bold"), anchor="w")
+        title_lbl.pack(fill="x")
+
+        sub_text = self.t("export_dialog_subtitle", title=meta["title"])
+        sub_lbl = tk.Label(header_frame, text=sub_text,
+                           bg=c["panel"], fg=c["muted"], font=("Segoe UI", 9), anchor="w")
+        sub_lbl.pack(fill="x", pady=(2, 6))
+
+        stats_text = self.t("export_summary_info", messages=meta["total_messages"],
+                            words=meta["total_words"], tokens=meta["tokens_approx"])
+        stats_lbl = tk.Label(header_frame, text=f"📊  {stats_text}",
+                             bg=c["panel"], fg=c["accent"], font=("Segoe UI", 9, "bold"), anchor="w")
+        stats_lbl.pack(fill="x")
+
+        if not meta["total_messages"]:
+            empty_lbl = tk.Label(header_frame, text=self.t("export_empty_notice"),
+                                 bg=c["panel"], fg=c["muted"], font=("Segoe UI", 8, "italic"), anchor="w")
+            empty_lbl.pack(fill="x", pady=(4, 0))
+
+        # Main content area
+        body_frame = tk.Frame(win, bg=c["bg"], padx=20, pady=14)
+        body_frame.pack(fill="both", expand=True)
+
+        # Formats section
+        tk.Label(body_frame, text=self.t("export_format_label"), bg=c["bg"], fg=c["accent"],
+                 font=("Segoe UI", 10, "bold"), anchor="w").pack(fill="x", pady=(0, 6))
+
+        format_var = tk.StringVar(value="pdf")
+
+        formats = [
+            ("pdf", self.t("export_format_pdf")),
+            ("md", self.t("export_format_md")),
+            ("html", self.t("export_format_html")),
+            ("json", self.t("export_format_json")),
+        ]
+
+        # Destination path setup
+        default_dir = os.path.expanduser("~/Documents")
+        if not os.path.isdir(default_dir):
+            default_dir = os.path.expanduser("~")
+        init_file_path = os.path.join(default_dir, f"{clean_title}.pdf")
+
+        path_var = tk.StringVar(value=init_file_path)
+
+        def on_format_change():
+            cur = path_var.get().strip()
+            if not cur:
+                return
+            root_p, ext = os.path.splitext(cur)
+            if ext.lower() in (".pdf", ".md", ".html", ".htm", ".json"):
+                new_fmt = format_var.get()
+                path_var.set(f"{root_p}.{new_fmt}")
+
+        for val, label_text in formats:
+            rb = tk.Radiobutton(body_frame, text=label_text, value=val, variable=format_var,
+                                bg=c["bg"], fg=c["text"], selectcolor=c["entry"],
+                                activebackground=c["bg"], activeforeground=c["text"],
+                                font=("Segoe UI", 9), anchor="w", command=on_format_change)
+            rb.pack(fill="x", pady=2)
+
+        # Separator line
+        sep1 = tk.Frame(body_frame, height=1, bg=c["border"])
+        sep1.pack(fill="x", pady=12)
+
+        # Options section
+        tk.Label(body_frame, text=self.t("export_options_label"), bg=c["bg"], fg=c["accent"],
+                 font=("Segoe UI", 10, "bold"), anchor="w").pack(fill="x", pady=(0, 6))
+
+        opt_meta_var = tk.BooleanVar(value=True)
+        opt_time_var = tk.BooleanVar(value=True)
+        opt_syntax_var = tk.BooleanVar(value=True)
+
+        cb_meta = tk.Checkbutton(body_frame, text=self.t("export_opt_metadata"), variable=opt_meta_var,
+                                 bg=c["bg"], fg=c["text"], selectcolor=c["entry"],
+                                 activebackground=c["bg"], activeforeground=c["text"],
+                                 font=("Segoe UI", 9), anchor="w")
+        cb_meta.pack(fill="x", pady=2)
+
+        cb_time = tk.Checkbutton(body_frame, text=self.t("export_opt_timestamps"), variable=opt_time_var,
+                                 bg=c["bg"], fg=c["text"], selectcolor=c["entry"],
+                                 activebackground=c["bg"], activeforeground=c["text"],
+                                 font=("Segoe UI", 9), anchor="w")
+        cb_time.pack(fill="x", pady=2)
+
+        cb_syntax = tk.Checkbutton(body_frame, text=self.t("export_opt_syntax"), variable=opt_syntax_var,
+                                   bg=c["bg"], fg=c["text"], selectcolor=c["entry"],
+                                   activebackground=c["bg"], activeforeground=c["text"],
+                                   font=("Segoe UI", 9), anchor="w")
+        cb_syntax.pack(fill="x", pady=2)
+
+        # Separator line
+        sep2 = tk.Frame(body_frame, height=1, bg=c["border"])
+        sep2.pack(fill="x", pady=12)
+
+        # Destination path section
+        tk.Label(body_frame, text=self.t("export_dest_label"), bg=c["bg"], fg=c["text"],
+                 font=("Segoe UI", 10, "bold"), anchor="w").pack(fill="x", pady=(0, 4))
+
+        dest_row = tk.Frame(body_frame, bg=c["bg"])
+        dest_row.pack(fill="x", pady=(0, 8))
+
+        path_entry = tk.Entry(dest_row, textvariable=path_var, font=("Segoe UI", 9), relief="flat",
+                              bg=c["entry"], fg=c["text"], insertbackground=c["text"])
+        path_entry.pack(side="left", fill="x", expand=True, ipady=5, padx=(0, 8))
+
+        def browse_destination():
+            fmt = format_var.get()
+            ext_map = {
+                "pdf": (".pdf", [("PDF Document", "*.pdf"), ("All Files", "*.*")]),
+                "md": (".md", [("Markdown File", "*.md"), ("All Files", "*.*")]),
+                "html": (".html", [("HTML File", "*.html;*.htm"), ("All Files", "*.*")]),
+                "json": (".json", [("JSON File", "*.json"), ("All Files", "*.*")]),
+            }
+            def_ext, types = ext_map.get(fmt, (".pdf", [("All Files", "*.*")]))
+            current_path = path_var.get().strip()
+            init_dir = os.path.dirname(current_path) if current_path else default_dir
+            init_file = os.path.basename(current_path) if current_path else f"{clean_title}{def_ext}"
+            picked = filedialog.asksaveasfilename(
+                parent=win,
+                title=self.t("export_dialog_title"),
+                initialdir=init_dir,
+                initialfile=init_file,
+                defaultextension=def_ext,
+                filetypes=types
+            )
+            if picked:
+                path_var.set(picked)
+
+        browse_btn = Button(dest_row, text=self.t("export_browse_btn"), command=browse_destination,
+                            relief="flat", bg=c["panel"], fg=c["text"], activebackground=c["border"],
+                            activeforeground=c["text"], cursor="hand2", padx=12, pady=4)
+        browse_btn.pack(side="right")
+
+        # Bottom Buttons
+        btn_row = tk.Frame(win, bg=c["bg"], padx=20, pady=16)
+        btn_row.pack(fill="x")
+
+        def cancel(_e=None):
+            win.destroy()
+
+        def do_export(_e=None):
+            target_path = (path_entry.get() or path_var.get()).strip()
+            if not target_path:
+                return
+            selected_fmt = format_var.get()
+            ext = os.path.splitext(target_path)[1].lower().lstrip(".")
+            if ext in ("pdf", "md", "markdown", "html", "htm", "json"):
+                selected_fmt = "html" if ext == "htm" else ("md" if ext == "markdown" else ext)
+            options = {
+                "include_metadata": opt_meta_var.get(),
+                "include_timestamps": opt_time_var.get(),
+                "syntax_highlight": opt_syntax_var.get(),
+                "theme": "dark" if self.dark_mode else "light"
+            }
+            try:
+                exporter = ConversationExporter(chat, options)
+                out_path = exporter.export_to_file(selected_fmt, target_path)
+                win.destroy()
+                messagebox.showinfo(
+                    self.t("export_success_title"),
+                    self.t("export_success_msg", path=out_path),
+                    parent=self.root
+                )
+            except Exception as ex:
+                messagebox.showerror(
+                    self.t("export_error_title"),
+                    self.t("export_error_msg", error=str(ex)),
+                    parent=win
+                )
+
+        export_action_btn = Button(btn_row, text=self.t("export_action_btn"), command=do_export,
+                                   relief="flat", bg=c["accent"], fg="white", activebackground=c["accent2"],
+                                   activeforeground="white", cursor="hand2", padx=18, pady=8,
+                                   font=("Segoe UI", 9, "bold"))
+        export_action_btn.pack(side="right")
+
+        cancel_action_btn = Button(btn_row, text=self.t("export_cancel_btn"), command=cancel,
+                                   relief="flat", bg=c["danger"], fg=c["accent2"], activebackground=c["danger"],
+                                   activeforeground=c["text"], cursor="hand2", padx=16, pady=8,
+                                   font=("Segoe UI", 9, "bold"))
+        cancel_action_btn.pack(side="right", padx=(0, 8))
+
+        win.format_var = format_var
+        win.path_entry = path_entry
+        win.path_var = path_var
+        win.export_btn = export_action_btn
+        win.cancel_btn = cancel_action_btn
+        win.do_export = do_export
+
+        win.bind("<Return>", do_export)
+        win.bind("<Escape>", cancel)
+        win.protocol("WM_DELETE_WINDOW", cancel)
+
+        # Center on root
+        win.update_idletasks()
+        x = self.root.winfo_rootx() + (self.root.winfo_width() - win.winfo_reqwidth()) // 2
+        y = self.root.winfo_rooty() + (self.root.winfo_height() - win.winfo_reqheight()) // 3
+        win.geometry(f"+{max(x, 0)}+{max(y, 0)}")
+        try:
+            win.grab_set()
+        except tk.TclError:
+            pass
+        return win
 
     def clear_chat(self):
         chat = self.current_chat()
