@@ -68,6 +68,8 @@ JUGNU has two front ends, a desktop window and a terminal version, that share on
 | `history_lock.py` | Stops two windows from using the same chat history |
 | `tests/` | Automated tests (`test_core.py` covers core, `test_stt.py` covers voice dictation, `test_exporter.py` covers export, `test_personas.py` covers personas, `test_vault.py` covers encrypted vault) |
 | `history_lock.py` | Stops two windows from using the same chat history |
+| `tests/` | Automated tests (`test_core.py` covers core, `test_stt.py` covers voice dictation, `test_exporter.py` covers export, `test_personas.py` covers personas) |
+| `history_lock.py` | Stops two windows from using the same chat history |
 | `tests/` | Automated tests (`test_core.py` covers core, `test_stt.py` covers voice dictation, `test_exporter.py` covers conversation export) |
 
 If something must behave the same in the window and in the terminal, it belongs in `core.py`. Wording and layout stay in the file that shows them.
