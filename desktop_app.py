@@ -4,6 +4,7 @@ from tkinter import font as tkfont
 import math
 import json
 import threading
+import time
 import uuid
 import os
 import sys
@@ -17,6 +18,10 @@ from core import (
 )
 from strings import build_system_prompt, get_string, next_language, normalize_language
 from tts import TTSManager, DEFAULT_RATE, DEFAULT_VOLUME, RATE_MIN, RATE_MAX, clamp
+from stt import (
+    STTManager, STTState, DEFAULT_HOTKEY, DEFAULT_SILENCE_TIMEOUT,
+    compute_rms, compute_waveform_bars, format_transcription
+)
 from history_lock import HistoryInUseError, HistoryLock
 from markdown_render import render_markdown, plain_text
 
@@ -113,6 +118,188 @@ class FlatButton(tk.Label):
 # tk.Button keeps the native look elsewhere; on macOS it ignores the theme colours.
 Button = FlatButton if sys.platform == "darwin" else tk.Button
 
+
+class WaveformHUD(tk.Frame):
+    """Real-time Voice Waveform and Audio Activity HUD visualizer.
+
+    Displays an animated waveform, live audio level bars, pulsing recording dot,
+    elapsed timer, and offline transcription status in the chat input bar.
+    """
+
+    def __init__(self, master=None, on_cancel=None, **kwargs):
+        super().__init__(master, **kwargs)
+        self.on_cancel = on_cancel
+        self.canvas = tk.Canvas(self, height=44, highlightthickness=0)
+        self.canvas.pack(fill="x", expand=True)
+
+        self.num_bars = 28
+        self.levels = [0.0] * self.num_bars
+        self.current_rms = 0.0
+        self.is_listening = False
+        self.is_transcribing = False
+        self.start_time = 0.0
+        self.pulse_phase = 0.0
+        self.colors = LIGHT
+        self.status_text = "Listening…"
+        self.transcribing_text = "Transcribing speech offline…"
+        self.cancel_text = "✕ Cancel"
+        self._anim_timer = None
+        self._cancel_rect = (0, 0, 0, 0)
+
+        self.canvas.bind("<Configure>", self._on_configure)
+        self.canvas.bind("<Button-1>", self._on_click)
+
+    def set_theme(self, colors):
+        self.colors = colors
+        self.configure(bg=colors["bg"])
+        self.canvas.configure(bg=colors["panel"])
+        self.redraw()
+
+    def set_texts(self, status_text=None, transcribing_text=None, cancel_text=None):
+        if status_text:
+            self.status_text = status_text
+        if transcribing_text:
+            self.transcribing_text = transcribing_text
+        if cancel_text:
+            self.cancel_text = cancel_text
+        self.redraw()
+
+    def start_listening(self):
+        self.is_listening = True
+        self.is_transcribing = False
+        self.start_time = time.monotonic()
+        self.levels = [0.0] * self.num_bars
+        self.current_rms = 0.0
+        self._start_animation()
+
+    def start_transcribing(self):
+        self.is_listening = False
+        self.is_transcribing = True
+        self._start_animation()
+
+    def stop(self):
+        self.is_listening = False
+        self.is_transcribing = False
+        if self._anim_timer:
+            try:
+                self.after_cancel(self._anim_timer)
+            except Exception:
+                pass
+            self._anim_timer = None
+        try:
+            self.canvas.delete("all")
+        except Exception:
+            pass
+
+    def update_levels(self, rms: float, bars: list[float]):
+        self.current_rms = rms
+        if len(bars) == self.num_bars:
+            self.levels = bars
+        elif bars:
+            self.levels = bars[:self.num_bars] + [0.0] * max(0, self.num_bars - len(bars))
+        self.redraw()
+
+    def _start_animation(self):
+        if not self._anim_timer:
+            self._animate()
+
+    def _animate(self):
+        self.pulse_phase += 0.15
+        self.redraw()
+        if self.is_listening or self.is_transcribing:
+            try:
+                self._anim_timer = self.after(35, self._animate)
+            except Exception:
+                self._anim_timer = None
+        else:
+            self._anim_timer = None
+
+    def _on_configure(self, _event):
+        self.redraw()
+
+    def _on_click(self, event):
+        x1, y1, x2, y2 = self._cancel_rect
+        if x1 <= event.x <= x2 and y1 <= event.y <= y2:
+            if self.on_cancel:
+                self.on_cancel()
+
+    def redraw(self):
+        try:
+            self.canvas.delete("all")
+            w = self.canvas.winfo_width()
+            h = self.canvas.winfo_height()
+        except Exception:
+            return
+
+        if w < 50 or h < 20:
+            return
+
+        c = self.colors
+        # Draw background container border
+        self.canvas.create_rectangle(1, 1, w - 2, h - 2, outline=c["border"], width=1, fill=c["panel"])
+
+        if self.is_listening:
+            # Left side: Live pulsing recording dot + Timer
+            elapsed = int(time.monotonic() - self.start_time)
+            mins, secs = divmod(elapsed, 60)
+            timer_str = f"{mins}:{secs:02d}"
+
+            # Cancel button on right
+            btn_w = 72
+            btn_h = 24
+            bx2 = w - 12
+            bx1 = bx2 - btn_w
+            by1 = (h - btn_h) // 2
+            by2 = by1 + btn_h
+            self._cancel_rect = (bx1, by1, bx2, by2)
+            self.canvas.create_rectangle(bx1, by1, bx2, by2, fill=c["danger"], outline=c["accent2"], width=1)
+            self.canvas.create_text((bx1 + bx2) // 2, (by1 + by2) // 2, text=self.cancel_text,
+                                    font=("Segoe UI", 8, "bold"), fill=c["accent2"])
+
+            # Pulsing recording dot
+            pulse_rad = 5 + int(1.5 * math.sin(self.pulse_phase * 2))
+            cx = 18
+            cy = h // 2
+            self.canvas.create_oval(cx - pulse_rad, cy - pulse_rad, cx + pulse_rad, cy + pulse_rad,
+                                    fill=c["accent2"], outline="")
+            self.canvas.create_text(30, cy, text=f"{self.status_text} {timer_str}",
+                                    anchor="w", font=("Segoe UI", 9, "bold"), fill=c["accent2"])
+
+            # Waveform Equalizer in Center
+            left_bound = 150
+            right_bound = max(left_bound + 60, bx1 - 20)
+            available_w = right_bound - left_bound
+            if available_w > 60:
+                bar_spacing = available_w / self.num_bars
+                bar_w = max(2, min(5, bar_spacing - 2))
+                center_y = h // 2
+                max_h = (h - 14) // 2
+
+                for i in range(self.num_bars):
+                    bx = left_bound + i * bar_spacing + bar_w / 2
+                    ambient = 2.0 + 1.5 * math.sin(self.pulse_phase + i * 0.4)
+                    voice = self.levels[i] * max_h
+                    bh = max(ambient, voice)
+
+                    # Dynamic color based on amplitude
+                    ratio = min(1.0, bh / max(max_h, 1))
+                    bar_color = c["accent2"] if ratio > 0.4 else c["accent"]
+
+                    self.canvas.create_line(bx, center_y - bh, bx, center_y + bh,
+                                            width=bar_w, fill=bar_color, capstyle="round")
+
+        elif self.is_transcribing:
+            # Transcribing animation
+            self.canvas.create_text(16, h // 2, text=f"⏳ {self.transcribing_text}",
+                                    anchor="w", font=("Segoe UI", 9, "bold"), fill=c["accent"])
+
+            # Shimmer animation moving across
+            shimmer_range = max(100, w - 240)
+            shimmer_x = int((self.pulse_phase * 45) % shimmer_range) + 200
+            self.canvas.create_line(shimmer_x, h // 2, min(w - 20, shimmer_x + 60), h // 2,
+                                    width=4, fill=c["accent2"], capstyle="round")
+
+
 class JugnuApp:
     def __init__(self, root):
         self.root = root
@@ -129,6 +316,17 @@ class JugnuApp:
         self.voice_rate, self.voice_volume, self.voice_id = self.load_voice_prefs()
         self.tts = TTSManager(rate=self.voice_rate, volume=self.voice_volume,
                               voice_id=self.voice_id)  # Offline voice output; runs on its own thread.
+        self.stt_auto_punctuate, self.stt_silence_detection, self.stt_silence_timeout, \
+            self.stt_noise_suppression, self.stt_hotkey = self.load_stt_prefs()
+        self.stt = STTManager(
+            silence_timeout=self.stt_silence_timeout if self.stt_silence_detection else 999.0,
+            noise_suppression=self.stt_noise_suppression,
+            auto_punctuate=self.stt_auto_punctuate,
+            auto_capitalize=True,
+        )
+        self.hud_shown = False
+        self._hotkey_pressed_time = 0.0
+        self._mic_btn_press_time = 0.0
         self.voice_win = None  # the Voice Settings window while it is open
         self.vw = {}           # its widgets, so theme and language changes can update them
         self.voice_enabled = self.load_voice_setting()
@@ -143,6 +341,7 @@ class JugnuApp:
         self.canvas_width = None
 
         self.build_ui()
+        self.bind_hotkeys()
         if self.chats:
             self.current_id = self.chats[-1]["id"]  # Reopen most recent saved conversation.
         else:
@@ -151,6 +350,7 @@ class JugnuApp:
         self.apply_theme()
         self.root.after(250, self.warm_up)
         self.poll_speech()
+        self.poll_stt()
 
     def load_history(self):
         """Load valid, non-empty conversations from the history file."""
@@ -313,12 +513,45 @@ class JugnuApp:
         except (FileNotFoundError, json.JSONDecodeError, OSError, AttributeError):
             return normalize_language(None)
 
+    def load_stt_prefs(self):
+        auto_punct = True
+        silence_detect = True
+        silence_timeout = DEFAULT_SILENCE_TIMEOUT
+        noise_suppress = True
+        hotkey = DEFAULT_HOTKEY
+        try:
+            with open(SETTINGS_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if "stt_auto_punctuate" in data:
+                auto_punct = bool(data["stt_auto_punctuate"])
+            if "stt_silence_detection" in data:
+                silence_detect = bool(data["stt_silence_detection"])
+            if "stt_silence_timeout" in data and isinstance(data["stt_silence_timeout"], (int, float)):
+                silence_timeout = max(0.5, min(5.0, float(data["stt_silence_timeout"])))
+            if "stt_noise_suppression" in data:
+                noise_suppress = bool(data["stt_noise_suppression"])
+            if "stt_hotkey" in data and isinstance(data["stt_hotkey"], str) and data["stt_hotkey"].strip():
+                hotkey = data["stt_hotkey"].strip()
+        except (FileNotFoundError, json.JSONDecodeError, OSError, AttributeError):
+            pass
+        return auto_punct, silence_detect, silence_timeout, noise_suppress, hotkey
+
     def save_settings(self):
         try:
             with open(SETTINGS_FILE, "w", encoding="utf-8") as f:
-                json.dump({"dark_mode": self.dark_mode, "voice_enabled": self.voice_enabled,
-                           "language": self.language, "voice_rate": self.voice_rate,
-                           "voice_volume": self.voice_volume, "voice_id": self.voice_id}, f)
+                json.dump({
+                    "dark_mode": self.dark_mode,
+                    "voice_enabled": self.voice_enabled,
+                    "language": self.language,
+                    "voice_rate": self.voice_rate,
+                    "voice_volume": self.voice_volume,
+                    "voice_id": self.voice_id,
+                    "stt_auto_punctuate": getattr(self, "stt_auto_punctuate", True),
+                    "stt_silence_detection": getattr(self, "stt_silence_detection", True),
+                    "stt_silence_timeout": getattr(self, "stt_silence_timeout", DEFAULT_SILENCE_TIMEOUT),
+                    "stt_noise_suppression": getattr(self, "stt_noise_suppression", True),
+                    "stt_hotkey": getattr(self, "stt_hotkey", DEFAULT_HOTKEY),
+                }, f)
         except OSError:
             pass
 
@@ -364,7 +597,7 @@ class JugnuApp:
         self.voice_settings_btn = Button(self.sidebar, command=self.open_voice_settings,
                                             relief="flat", pady=10)
         self.voice_settings_btn.pack(fill="x", padx=12, pady=(0, 8))
-        if not self.tts.available:
+        if not (self.tts.available or self.stt.has_mic or self.stt.has_recognizer):
             self.voice_settings_btn.configure(state="disabled")
         self.language_btn = Button(self.sidebar, command=self.toggle_language,
                                       relief="flat", pady=10)
@@ -406,14 +639,29 @@ class JugnuApp:
 
         self.bottom = tk.Frame(self.content)
         self.bottom.pack(fill="x", padx=12, pady=(0, 12))
-        self.input_box = tk.Text(self.bottom, height=2, wrap="word", font=("Segoe UI", 11),
+
+        self.hud_container = tk.Frame(self.bottom)
+        self.waveform_hud = WaveformHUD(self.hud_container, on_cancel=self.cancel_dictation)
+        self.waveform_hud.pack(fill="x", expand=True)
+
+        self.input_row = tk.Frame(self.bottom)
+        self.input_row.pack(fill="x", expand=True)
+
+        self.input_box = tk.Text(self.input_row, height=2, wrap="word", font=("Segoe UI", 11),
                                  relief="flat", padx=10, pady=10, undo=True)
         self.input_box.pack(side="left", fill="x", expand=True, padx=(0, 10))
         self.input_box.bind("<Control-Return>", self.send_message)
         self.input_box.bind("<Return>", self.send_message)
         self.input_box.bind("<Shift-Return>", lambda event: None)
-        self.send_btn = Button(self.bottom, command=self.send_message,
-                                  relief="flat", font=("Segoe UI", 10, "bold"), padx=18, pady=12)
+
+        self.mic_btn = Button(self.input_row, command=self.toggle_dictation,
+                              relief="flat", font=("Segoe UI", 10, "bold"), padx=14, pady=12)
+        self.mic_btn.pack(side="right", padx=(0, 8))
+        self.mic_btn.bind("<ButtonPress-1>", self.on_mic_btn_press)
+        self.mic_btn.bind("<ButtonRelease-1>", self.on_mic_btn_release)
+
+        self.send_btn = Button(self.input_row, command=self.send_message,
+                               relief="flat", font=("Segoe UI", 10, "bold"), padx=18, pady=12)
         self.send_btn.pack(side="right")
 
     def on_frame_configure(self, _event=None):
@@ -544,7 +792,8 @@ class JugnuApp:
         widgets = [
             (self.root, c["bg"]), (self.main, c["bg"]), (self.sidebar, c["sidebar"]),
             (self.content, c["bg"]), (self.header, c["accent"]), (self.chat_area, c["bg"]),
-            (self.canvas, c["bg"]), (self.messages_frame, c["bg"]), (self.bottom, c["bg"])
+            (self.canvas, c["bg"]), (self.messages_frame, c["bg"]), (self.bottom, c["bg"]),
+            (self.input_row, c["bg"]), (self.hud_container, c["bg"])
         ]
         for widget, color in widgets:
             widget.configure(bg=color)
@@ -567,6 +816,10 @@ class JugnuApp:
         self.clear_btn.configure(bg=c["danger"], fg=c["accent2"], activebackground=c["danger"],
                                  activeforeground=c["text"], cursor="hand2")
         self.input_box.configure(bg=c["entry"], fg=c["text"], insertbackground=c["text"])
+        mic_bg = c["accent2"] if self.stt.is_listening else c["accent"]
+        self.mic_btn.configure(bg=mic_bg, fg="white", activebackground=c["accent2"],
+                               activeforeground="white", cursor="hand2")
+        self.waveform_hud.set_theme(c)
         self.send_btn.configure(bg=c["accent"], fg="white", activebackground=c["accent2"],
                                 activeforeground="white", cursor="hand2")
         self.theme_btn.configure(text=self.theme_button_text())
@@ -609,7 +862,7 @@ class JugnuApp:
         elif not speaking and self.stop_shown:
             self.stop_btn.pack_forget()
             self.stop_shown = False
-        state = "normal" if self.tts.available else "disabled"
+        state = "normal" if (self.tts.available or self.stt.has_mic or self.stt.has_recognizer) else "disabled"
         self.voice_settings_btn.configure(state=state)
         for btn in self.read_buttons:
             try:
@@ -630,7 +883,7 @@ class JugnuApp:
         return labels, ids
 
     def open_voice_settings(self):
-        if not self.tts.available:
+        if not (self.tts.available or self.stt.has_mic or self.stt.has_recognizer):
             return
         if self.voice_win is not None:
             self.voice_win.lift()
@@ -646,29 +899,53 @@ class JugnuApp:
         index = ids.index(self.voice_id) if self.voice_id in ids else 0
         self.voice_choice = tk.StringVar(value=labels[index])
         w = self.vw = {"win": win}
-        w["rate_label"] = tk.Label(win, font=("Segoe UI", 10, "bold"), anchor="w")
-        w["rate"] = tk.Scale(win, from_=RATE_MIN, to=RATE_MAX, resolution=5, orient="horizontal",
-                             showvalue=False, length=300, highlightthickness=0, bd=0)
-        w["volume_label"] = tk.Label(win, font=("Segoe UI", 10, "bold"), anchor="w")
-        w["volume"] = tk.Scale(win, from_=0, to=100, resolution=5, orient="horizontal",
-                               showvalue=False, length=300, highlightthickness=0, bd=0)
-        w["voice_label"] = tk.Label(win, font=("Segoe UI", 10, "bold"), anchor="w")
-        w["voice"] = tk.OptionMenu(win, self.voice_choice, *labels, command=self.on_voice_pick)
-        w["test"] = Button(win, command=self.test_voice, relief="flat",
-                              font=("Segoe UI", 10, "bold"), pady=8)
+        if self.tts.available:
+            w["rate_label"] = tk.Label(win, font=("Segoe UI", 10, "bold"), anchor="w")
+            w["rate"] = tk.Scale(win, from_=RATE_MIN, to=RATE_MAX, resolution=5, orient="horizontal",
+                                 showvalue=False, length=300, highlightthickness=0, bd=0)
+            w["volume_label"] = tk.Label(win, font=("Segoe UI", 10, "bold"), anchor="w")
+            w["volume"] = tk.Scale(win, from_=0, to=100, resolution=5, orient="horizontal",
+                                   showvalue=False, length=300, highlightthickness=0, bd=0)
+            w["voice_label"] = tk.Label(win, font=("Segoe UI", 10, "bold"), anchor="w")
+            w["voice"] = tk.OptionMenu(win, self.voice_choice, *labels, command=self.on_voice_pick)
+            w["test"] = Button(win, command=self.test_voice, relief="flat",
+                                  font=("Segoe UI", 10, "bold"), pady=8)
+            # Set the starting positions first, then attach the callbacks, so opening the
+            # window never rewrites the saved values.
+            w["rate"].set(self.voice_rate)
+            w["volume"].set(round(self.voice_volume * 100))
+            w["rate"].configure(command=self.on_rate_change)
+            w["volume"].configure(command=self.on_volume_change)
+            for slider in (w["rate"], w["volume"]):
+                slider.bind("<ButtonRelease-1>", lambda _e: self.save_settings())
+                slider.bind("<KeyRelease>", lambda _e: self.save_settings())
+            for key in ("rate_label", "rate", "volume_label", "volume", "voice_label", "voice"):
+                w[key].pack(fill="x", padx=20, pady=(14, 0) if key.endswith("label") else (2, 0))
+            w["test"].pack(fill="x", padx=20, pady=(18, 6))
+
+        # STT Dictation Section
+        w["stt_section_label"] = tk.Label(win, font=("Segoe UI", 10, "bold"), anchor="w")
+        w["stt_punct_var"] = tk.BooleanVar(value=self.stt_auto_punctuate)
+        w["stt_punct"] = tk.Checkbutton(win, variable=w["stt_punct_var"],
+                                        command=self.on_stt_setting_change, anchor="w",
+                                        relief="flat", highlightthickness=0)
+        w["stt_silence_var"] = tk.BooleanVar(value=self.stt_silence_detection)
+        w["stt_silence"] = tk.Checkbutton(win, variable=w["stt_silence_var"],
+                                          command=self.on_stt_setting_change, anchor="w",
+                                          relief="flat", highlightthickness=0)
+        w["stt_noise_var"] = tk.BooleanVar(value=self.stt_noise_suppression)
+        w["stt_noise"] = tk.Checkbutton(win, variable=w["stt_noise_var"],
+                                        command=self.on_stt_setting_change, anchor="w",
+                                        relief="flat", highlightthickness=0)
+        w["stt_hotkey_label"] = tk.Label(win, font=("Segoe UI", 9), anchor="w")
+
+        w["stt_section_label"].pack(fill="x", padx=20, pady=(14, 4))
+        w["stt_punct"].pack(fill="x", padx=20, pady=2)
+        w["stt_silence"].pack(fill="x", padx=20, pady=2)
+        w["stt_noise"].pack(fill="x", padx=20, pady=2)
+        w["stt_hotkey_label"].pack(fill="x", padx=20, pady=(4, 12))
+
         w["close"] = Button(win, command=self.close_voice_settings, relief="flat", pady=8)
-        # Set the starting positions first, then attach the callbacks, so opening the
-        # window never rewrites the saved values.
-        w["rate"].set(self.voice_rate)
-        w["volume"].set(round(self.voice_volume * 100))
-        w["rate"].configure(command=self.on_rate_change)
-        w["volume"].configure(command=self.on_volume_change)
-        for slider in (w["rate"], w["volume"]):
-            slider.bind("<ButtonRelease-1>", lambda _e: self.save_settings())
-            slider.bind("<KeyRelease>", lambda _e: self.save_settings())
-        for key in ("rate_label", "rate", "volume_label", "volume", "voice_label", "voice"):
-            w[key].pack(fill="x", padx=20, pady=(14, 0) if key.endswith("label") else (2, 0))
-        w["test"].pack(fill="x", padx=20, pady=(18, 6))
         w["close"].pack(fill="x", padx=20, pady=(0, 18))
         self.update_voice_window()
 
@@ -679,31 +956,60 @@ class JugnuApp:
         w, c = self.vw, self.colors
         w["win"].title(self.t("voice_settings_title"))
         w["win"].configure(bg=c["bg"])
-        self.update_voice_value_labels()
-        w["voice_label"].configure(text=self.t("voice_choice_label"))
-        w["test"].configure(text=self.t("voice_test_btn"))
+        if self.tts.available and "rate_label" in w:
+            self.update_voice_value_labels()
+            w["voice_label"].configure(text=self.t("voice_choice_label"))
+            w["test"].configure(text=self.t("voice_test_btn"))
+            for key in ("rate_label", "volume_label", "voice_label"):
+                w[key].configure(bg=c["bg"], fg=c["text"])
+            for key in ("rate", "volume"):
+                w[key].configure(bg=c["bg"], fg=c["text"], troughcolor=c["border"],
+                                 activebackground=c["accent2"])
+            w["voice"].configure(bg=c["panel"], fg=c["text"], activebackground=c["accent"],
+                                 activeforeground="white", highlightthickness=0, relief="flat")
+            w["voice"]["menu"].configure(bg=c["panel"], fg=c["text"], activebackground=c["accent"],
+                                         activeforeground="white")
+            w["test"].configure(bg=c["accent"], fg="white", activebackground=c["accent2"],
+                                activeforeground="white", cursor="hand2")
+            labels, ids = self.voice_labels()
+            menu = w["voice"]["menu"]
+            menu.delete(0, "end")
+            for label in labels:
+                menu.add_command(label=label, command=lambda lb=label: self.on_voice_pick(lb))
+            index = ids.index(self.voice_id) if self.voice_id in ids else 0
+            self.voice_choice.set(labels[index])
+
+        if "stt_section_label" in w:
+            w["stt_section_label"].configure(text=self.t("stt_settings_section"), bg=c["bg"], fg=c["text"])
+            w["stt_punct"].configure(text=self.t("stt_auto_punctuate_label"), bg=c["bg"], fg=c["text"],
+                                     activebackground=c["bg"], activeforeground=c["text"],
+                                     selectcolor=c["panel"])
+            w["stt_silence"].configure(text=self.t("stt_silence_detect_label"), bg=c["bg"], fg=c["text"],
+                                       activebackground=c["bg"], activeforeground=c["text"],
+                                       selectcolor=c["panel"])
+            w["stt_noise"].configure(text=self.t("stt_noise_suppress_label"), bg=c["bg"], fg=c["text"],
+                                     activebackground=c["bg"], activeforeground=c["text"],
+                                     selectcolor=c["panel"])
+            w["stt_hotkey_label"].configure(text=self.t("stt_hotkey_label", hotkey="Ctrl+Space"),
+                                            bg=c["bg"], fg=c["muted"])
+
         w["close"].configure(text=self.t("voice_close_btn"))
-        for key in ("rate_label", "volume_label", "voice_label"):
-            w[key].configure(bg=c["bg"], fg=c["text"])
-        for key in ("rate", "volume"):
-            w[key].configure(bg=c["bg"], fg=c["text"], troughcolor=c["border"],
-                             activebackground=c["accent2"])
-        w["voice"].configure(bg=c["panel"], fg=c["text"], activebackground=c["accent"],
-                             activeforeground="white", highlightthickness=0, relief="flat")
-        w["voice"]["menu"].configure(bg=c["panel"], fg=c["text"], activebackground=c["accent"],
-                                     activeforeground="white")
-        w["test"].configure(bg=c["accent"], fg="white", activebackground=c["accent2"],
-                            activeforeground="white", cursor="hand2")
         w["close"].configure(bg=c["danger"], fg=c["accent2"], activebackground=c["danger"],
                              activeforeground=c["text"], cursor="hand2")
-        # The default entry's label depends on the language, so rebuild the dropdown list.
-        labels, ids = self.voice_labels()
-        menu = w["voice"]["menu"]
-        menu.delete(0, "end")
-        for label in labels:
-            menu.add_command(label=label, command=lambda lb=label: self.on_voice_pick(lb))
-        index = ids.index(self.voice_id) if self.voice_id in ids else 0
-        self.voice_choice.set(labels[index])
+
+    def on_stt_setting_change(self):
+        w = self.vw
+        if not w:
+            return
+        self.stt_auto_punctuate = bool(w["stt_punct_var"].get())
+        self.stt_silence_detection = bool(w["stt_silence_var"].get())
+        self.stt_noise_suppression = bool(w["stt_noise_var"].get())
+        self.stt.apply_settings(
+            silence_timeout=self.stt_silence_timeout if self.stt_silence_detection else 999.0,
+            noise_suppression=self.stt_noise_suppression,
+            auto_punctuate=self.stt_auto_punctuate,
+        )
+        self.save_settings()
 
     def update_voice_value_labels(self):
         w = self.vw
@@ -754,8 +1060,143 @@ class JugnuApp:
                 self.root.after_cancel(self._resize_timer)
             except Exception:
                 pass
+        self.stt.shutdown()
         self.tts.shutdown()
         self.root.destroy()
+
+    # ---------- Voice Dictation (Offline STT) ----------
+    def bind_hotkeys(self):
+        self.root.bind("<Control-space>", self.on_hotkey_press)
+        self.root.bind("<KeyRelease-space>", self.on_hotkey_release)
+        self.root.bind("<Control-Shift-V>", lambda _e: self.toggle_dictation())
+        self.root.bind("<Control-Shift-v>", lambda _e: self.toggle_dictation())
+        self.root.bind("<Escape>", lambda _e: self.cancel_dictation())
+
+    def mic_button_text(self):
+        if self.stt.is_listening:
+            return self.t("mic_btn_listening")
+        if self.stt.is_transcribing:
+            return self.t("mic_btn_transcribing")
+        return self.t("mic_btn")
+
+    def toggle_dictation(self):
+        if not self.stt.has_mic:
+            self.show_no_mic_dialog()
+            return
+        if not self.stt.has_recognizer:
+            self.show_no_model_dialog()
+            return
+        if self.stt.is_listening:
+            self.stop_dictation()
+        else:
+            self.start_dictation()
+
+    def start_dictation(self):
+        if not self.stt.has_mic:
+            self.show_no_mic_dialog()
+            return
+        if not self.stt.has_recognizer:
+            self.show_no_model_dialog()
+            return
+        if self.tts.speaking:
+            self.tts.stop()
+        self.stt.start_listening()
+
+    def stop_dictation(self):
+        self.stt.stop_listening()
+
+    def cancel_dictation(self):
+        self.stt.cancel_listening()
+
+    def on_hotkey_press(self, _event=None):
+        if not self.stt.has_mic:
+            self.show_no_mic_dialog()
+            return "break"
+        if not self.stt.has_recognizer:
+            self.show_no_model_dialog()
+            return "break"
+        if not self.stt.is_listening:
+            self._hotkey_pressed_time = time.monotonic()
+            self.start_dictation()
+        return "break"
+
+    def on_hotkey_release(self, _event=None):
+        if self.stt.is_listening and self._hotkey_pressed_time > 0:
+            held = time.monotonic() - self._hotkey_pressed_time
+            self._hotkey_pressed_time = 0.0
+            if held >= 0.4:  # Push-to-talk release
+                self.stop_dictation()
+        return "break"
+
+    def on_mic_btn_press(self, _event=None):
+        self._mic_btn_press_time = time.monotonic()
+
+    def on_mic_btn_release(self, _event=None):
+        if self._mic_btn_press_time > 0:
+            held = time.monotonic() - self._mic_btn_press_time
+            self._mic_btn_press_time = 0.0
+            if held >= 0.4 and self.stt.is_listening:
+                self.stop_dictation()
+
+    def show_no_mic_dialog(self):
+        messagebox.showinfo(
+            self.t("mic_err_no_mic_title"),
+            self.t("mic_err_no_mic_msg"),
+            parent=self.root
+        )
+
+    def show_no_model_dialog(self):
+        messagebox.showinfo(
+            self.t("mic_err_no_model_title"),
+            self.t("mic_err_no_model_msg"),
+            parent=self.root
+        )
+
+    def poll_stt(self):
+        while not self.stt.event_queue.empty():
+            try:
+                event_type, data = self.stt.event_queue.get_nowait()
+            except queue.Empty:
+                break
+
+            if event_type == "state":
+                if data == STTState.LISTENING:
+                    if not self.hud_shown:
+                        self.hud_container.pack(fill="x", pady=(0, 8), before=self.input_row)
+                        self.hud_shown = True
+                    self.waveform_hud.start_listening()
+                    self.mic_btn.configure(text=self.t("mic_btn_listening"),
+                                           bg=self.colors["accent2"], fg="white")
+                elif data == STTState.TRANSCRIBING:
+                    if not self.hud_shown:
+                        self.hud_container.pack(fill="x", pady=(0, 8), before=self.input_row)
+                        self.hud_shown = True
+                    self.waveform_hud.start_transcribing()
+                    self.mic_btn.configure(text=self.t("mic_btn_transcribing"),
+                                           bg=self.colors["accent2"], fg="white")
+                elif data in (STTState.IDLE, STTState.ERROR):
+                    if self.hud_shown:
+                        self.hud_container.pack_forget()
+                        self.hud_shown = False
+                    self.waveform_hud.stop()
+                    self.mic_btn.configure(text=self.mic_button_text(),
+                                           bg=self.colors["accent"], fg="white")
+            elif event_type == "level":
+                rms, bars = data
+                self.waveform_hud.update_levels(rms, bars)
+            elif event_type == "result":
+                text = data
+                if text:
+                    current = self.input_box.get("1.0", "end-1c")
+                    prefix = " " if current and not current.endswith((" ", "\n")) else ""
+                    self.input_box.insert(tk.INSERT, prefix + text)
+                    self.input_box.see(tk.INSERT)
+                    self.input_box.focus_set()
+
+        try:
+            self.root.after(35, self.poll_stt)
+        except Exception:
+            pass
 
     def t(self, key, **kwargs):
         """Look up a user-facing string in the currently selected language."""
@@ -785,6 +1226,12 @@ class JugnuApp:
         self.theme_btn.configure(text=self.theme_button_text())
         self.header_title.configure(text=self.t("header_title"))
         self.send_btn.configure(text=self.t("send_btn"))
+        self.mic_btn.configure(text=self.mic_button_text())
+        self.waveform_hud.set_texts(
+            status_text=self.t("mic_hud_listening"),
+            transcribing_text=self.t("mic_hud_transcribing"),
+            cancel_text=self.t("mic_cancel_btn")
+        )
         key, kwargs = self._status
         self.set_status(key, **kwargs)
 
@@ -1358,6 +1805,8 @@ class JugnuApp:
         user_text = self.input_box.get("1.0", "end").strip()
         if not user_text:
             return "break"
+        if self.stt.is_listening:
+            self.stt.cancel_listening()
         self.tts.stop()  # A new message interrupts any reply still being read aloud.
         chat = self.current_chat()
         if not chat:

@@ -36,6 +36,26 @@ STRINGS = {
         "header_title": "✦  Your little genius is here!",
         # Chat area
         "send_btn": "➤  Send",
+        "mic_btn": "🎤  Dictate",
+        "mic_btn_listening": "⏹  Stop",
+        "mic_btn_transcribing": "⏳  Dictating…",
+        "mic_cancel_btn": "✕ Cancel",
+        "mic_hud_hint": "Speak clearly • Auto-stops on pause • Press {hotkey} or Stop",
+        "mic_hud_listening": "Listening…",
+        "mic_hud_transcribing": "Transcribing speech offline…",
+        "mic_hotkey_tooltip": "Voice Dictation ({hotkey}) - Push to talk or click to dictate",
+        "mic_err_no_mic_title": "No Microphone Detected",
+        "mic_err_no_mic_msg": ("No working microphone input device was found. "
+                               "Please plug in or enable a microphone and try again."),
+        "mic_err_no_model_title": "Offline Voice Model Required",
+        "mic_err_no_model_msg": ("Offline speech recognition requires a local model. "
+                                 "Install 'vosk' (`pip install vosk`) and place a lightweight "
+                                 "model in the 'models/' directory, or enable Windows Speech Recognition."),
+        "stt_settings_section": "Voice Dictation (Offline STT)",
+        "stt_auto_punctuate_label": "Auto-punctuation & capitalization",
+        "stt_silence_detect_label": "Auto-stop on silence (1.5s pause)",
+        "stt_noise_suppress_label": "Background noise suppression",
+        "stt_hotkey_label": "Dictation hotkey: {hotkey}",
         "you_label": "You",
         "welcome_title": "Hey! I'm JUGNU",
         "welcome_prompt": "What would you like to explore today?",
@@ -94,6 +114,26 @@ STRINGS = {
         "header_title": "✦  Aapka chhota genius aa gaya!",
         # Chat area
         "send_btn": "➤  Bhejo",
+        "mic_btn": "🎤  Bol kar likho",
+        "mic_btn_listening": "⏹  Roko",
+        "mic_btn_transcribing": "⏳  Likh raha hoon…",
+        "mic_cancel_btn": "✕ Cancel",
+        "mic_hud_hint": "Boliye • Pause karne par apne aap band hoga • Ya {hotkey} dabayein",
+        "mic_hud_listening": "Sun raha hoon…",
+        "mic_hud_transcribing": "Offline transcribe ho raha hai…",
+        "mic_hotkey_tooltip": "Voice Dictation ({hotkey}) - Bolne ke liye dabayein ya click karein",
+        "mic_err_no_mic_title": "Microphone Nahi Mila",
+        "mic_err_no_mic_msg": ("Koi microphone input device nahi mila. "
+                               "Kripya microphone connect karein aur dobara koshish karein."),
+        "mic_err_no_model_title": "Offline Voice Model Chahiye",
+        "mic_err_no_model_msg": ("Offline speech recognition ke liye local model chahiye. "
+                                 "'vosk' install karein (`pip install vosk`) aur ek lightweight "
+                                 "model 'models/' folder mein dalein."),
+        "stt_settings_section": "Voice Dictation (Offline STT)",
+        "stt_auto_punctuate_label": "Auto-punctuation aur capitalization",
+        "stt_silence_detect_label": "Silence par auto-stop (1.5s pause)",
+        "stt_noise_suppress_label": "Background noise suppression",
+        "stt_hotkey_label": "Dictation hotkey: {hotkey}",
         "you_label": "Aap",
         "welcome_title": "Hey! Main JUGNU hoon",
         "welcome_prompt": "Aaj aap kya explore karna chahenge?",
