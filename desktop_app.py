@@ -14,7 +14,8 @@ import re
 
 from core import (
     ERROR_CONNECTION, ERROR_INVALID, ERROR_TIMEOUT, build_messages, calculate,
-    chat as ollama_chat, is_time_question as detect_time_question, local_datetime_text, local_now,
+    chat as ollama_chat, is_time_question as detect_time_question, list_local_models,
+    local_datetime_text, local_now,
 )
 from strings import build_system_prompt, get_string, next_language, normalize_language
 from tts import TTSManager, DEFAULT_RATE, DEFAULT_VOLUME, RATE_MIN, RATE_MAX, clamp
@@ -29,6 +30,7 @@ from exporter import (
 )
 from personas import Persona, PersonaManager, BUILTIN_PERSONAS
 from vault import VaultManager
+from arena import ArenaSession, ArenaMetric
 
 APP_TITLE = "JUGNU | Just an Unusually Genius Neural Utility"
 HISTORY_FILE = "jugnu_history.json"
@@ -351,6 +353,8 @@ class JugnuApp:
         self.persona_manager = PersonaManager()
         self.current_persona_id = "default"
         self.persona_win = None
+        self.arena_win = None
+        self.arena_session = None
 
         self.build_ui()
         self.bind_hotkeys()
@@ -365,6 +369,7 @@ class JugnuApp:
         self.apply_theme()
         self.update_persona_ui()
         self.update_vault_ui()
+        self.arena_btn.configure(text=self.t("arena_btn"))
         self.root.after(250, self.warm_up)
         self.poll_speech()
         self.poll_stt()
@@ -638,6 +643,9 @@ class JugnuApp:
         self.vault_btn = Button(self.sidebar, command=self.open_vault_dialog,
                                 relief="flat", pady=10)
         self.vault_btn.pack(fill="x", padx=12, pady=(0, 8))
+        self.arena_btn = Button(self.sidebar, command=self.open_arena_dialog,
+                                relief="flat", pady=10)
+        self.arena_btn.pack(fill="x", padx=12, pady=(0, 8))
         self.language_btn = Button(self.sidebar, command=self.toggle_language,
                                       relief="flat", pady=10)
         self.language_btn.pack(fill="x", padx=12, pady=(0, 8))
@@ -858,7 +866,7 @@ class JugnuApp:
         self.history_list.configure(bg=c["sidebar"], fg=c["text"],
                                     selectbackground=c["accent"], selectforeground="white")
         for btn in [self.new_btn, self.theme_btn, self.voice_btn, self.language_btn,
-                    self.voice_settings_btn, self.persona_studio_btn, self.vault_btn]:
+                    self.voice_settings_btn, self.persona_studio_btn, self.vault_btn, self.arena_btn]:
             btn.configure(bg=c["accent"], fg="white", activebackground=c["accent2"],
                           activeforeground="white", cursor="hand2")
         self.voice_btn.configure(text=self.voice_button_text())
@@ -1130,6 +1138,8 @@ class JugnuApp:
         self.root.bind("<Control-Shift-P>", lambda _e: self.open_persona_studio())
         self.root.bind("<Control-l>", lambda _e: self.open_vault_dialog())
         self.root.bind("<Control-L>", lambda _e: self.open_vault_dialog())
+        self.root.bind("<Control-Shift-a>", lambda _e: self.open_arena_dialog())
+        self.root.bind("<Control-Shift-A>", lambda _e: self.open_arena_dialog())
 
     def mic_button_text(self):
         if self.stt.is_listening:
@@ -1284,6 +1294,7 @@ class JugnuApp:
         self.update_voice_window()
         self.update_persona_ui()
         self.update_vault_ui()
+        self.arena_btn.configure(text=self.t("arena_btn"))
         self.language_btn.configure(text=self.t("language_btn", name=self.t("language_name")))
         self.theme_btn.configure(text=self.theme_button_text())
         self.header_title.configure(text=self.t("header_title"))
@@ -1377,6 +1388,8 @@ class JugnuApp:
                          command=self.open_persona_studio)
         menu.add_command(label="🔒  " + self.t("vault_btn"),
                          command=self.open_vault_dialog)
+        menu.add_command(label="⚔️  " + self.t("arena_btn"),
+                         command=self.open_arena_dialog)
         menu.add_separator()
         menu.add_command(label=self.t("chat_menu_rename"),
                          command=lambda cid=chat["id"]: self.rename_chat(cid))
@@ -2452,6 +2465,237 @@ class JugnuApp:
         win.do_restore = do_restore
         win.do_verify = do_verify
         win.do_vacuum = do_vacuum
+        return win
+
+    def open_arena_dialog(self):
+        """Open the Multi-Model Side-by-Side Arena Comparison modal."""
+        if getattr(self, "arena_win", None) and self.arena_win.winfo_exists():
+            self.arena_win.lift()
+            self.arena_win.focus_force()
+            return self.arena_win
+
+        c = self.colors
+        win = tk.Toplevel(self.root)
+        self.arena_win = win
+        win.title("⚔️ " + self.t("arena_title"))
+        win.geometry("960x680")
+        win.minsize(820, 540)
+        win.transient(self.root)
+        win.grab_set()
+        win.configure(bg=c["panel"])
+
+        # Models list
+        models = list_local_models()
+        model_a_var = tk.StringVar(value=models[0] if models else "")
+        model_b_var = tk.StringVar(value=models[1] if len(models) > 1 else (models[0] if models else ""))
+
+        # Top Header Frame
+        hdr = tk.Frame(win, bg=c["panel"])
+        hdr.pack(fill="x", padx=18, pady=(12, 6))
+        tk.Label(hdr, text="⚔️  " + self.t("arena_title"),
+                 font=("Segoe UI", 13, "bold"), bg=c["panel"], fg=c["text"]).pack(anchor="w")
+        tk.Label(hdr, text=self.t("arena_subtitle"),
+                 font=("Segoe UI", 9), bg=c["panel"], fg=c["muted"]).pack(anchor="w")
+
+        # Selectors Bar
+        sel_row = tk.Frame(win, bg=c["sidebar"], padx=10, pady=6)
+        sel_row.pack(fill="x", padx=18, pady=(0, 8))
+
+        tk.Label(sel_row, text=self.t("arena_model_a") + ":", bg=c["sidebar"], fg=c["text"], font=("Segoe UI", 9, "bold")).pack(side="left", padx=(0, 4))
+        om_a = tk.OptionMenu(sel_row, model_a_var, *models)
+        om_a.configure(bg=c["entry"], fg=c["text"], relief="flat", highlightthickness=0)
+        om_a.pack(side="left", padx=(0, 16))
+
+        tk.Label(sel_row, text="⚡ VS ⚡", bg=c["sidebar"], fg=c["accent2"], font=("Segoe UI", 10, "bold")).pack(side="left", padx=12)
+
+        tk.Label(sel_row, text=self.t("arena_model_b") + ":", bg=c["sidebar"], fg=c["text"], font=("Segoe UI", 9, "bold")).pack(side="left", padx=(12, 4))
+        om_b = tk.OptionMenu(sel_row, model_b_var, *models)
+        om_b.configure(bg=c["entry"], fg=c["text"], relief="flat", highlightthickness=0)
+        om_b.pack(side="left")
+
+        # Split Panes Container
+        panes_box = tk.Frame(win, bg=c["panel"])
+        panes_box.pack(fill="both", expand=True, padx=18, pady=(0, 8))
+        panes_box.columnconfigure(0, weight=1, uniform="arena_col")
+        panes_box.columnconfigure(1, weight=1, uniform="arena_col")
+        panes_box.rowconfigure(0, weight=1)
+
+        def make_pane(col: int, model_var: tk.StringVar, pane_letter: str):
+            frame = tk.LabelFrame(panes_box, text=f" {self.t('arena_model_a' if pane_letter == 'A' else 'arena_model_b')} ",
+                                  font=("Segoe UI", 9, "bold"), bg=c["panel"], fg=c["text"], padx=8, pady=6)
+            frame.grid(row=0, column=col, sticky="nsew", padx=4)
+
+            top_bar = tk.Frame(frame, bg=c["panel"])
+            top_bar.pack(fill="x", pady=(0, 4))
+            lbl_name = tk.Label(top_bar, textvariable=model_var, font=("Segoe UI", 9, "bold"), bg=c["panel"], fg=c["accent"])
+            lbl_name.pack(side="left")
+            lbl_status = tk.Label(top_bar, text=self.t("arena_status_idle"), font=("Segoe UI", 8), bg=c["panel"], fg=c["muted"])
+            lbl_status.pack(side="right")
+
+            txt = tk.Text(frame, wrap="word", font=("Segoe UI", 10), bg=c["entry"], fg=c["text"],
+                          insertbackground=c["text"], relief="flat", highlightthickness=1,
+                          highlightbackground=c["border"], height=12)
+            txt.pack(fill="both", expand=True, pady=(0, 6))
+
+            hud = tk.Frame(frame, bg=c["sidebar"], padx=6, pady=4)
+            hud.pack(fill="x", pady=(0, 6))
+            lbl_ttft = tk.Label(hud, text="TTFT: —", font=("Segoe UI", 8), bg=c["sidebar"], fg=c["text"])
+            lbl_ttft.pack(side="left", padx=4)
+            lbl_tps = tk.Label(hud, text="Speed: —", font=("Segoe UI", 8), bg=c["sidebar"], fg=c["text"])
+            lbl_tps.pack(side="left", padx=4)
+            lbl_lat = tk.Label(hud, text="Latency: —", font=("Segoe UI", 8), bg=c["sidebar"], fg=c["text"])
+            lbl_lat.pack(side="left", padx=4)
+            lbl_tok = tk.Label(hud, text="Tokens: —", font=("Segoe UI", 8), bg=c["sidebar"], fg=c["text"])
+            lbl_tok.pack(side="left", padx=4)
+
+            btn_win = Button(frame, text=self.t("arena_winner_btn"), state="disabled",
+                             bg=c["accent"], fg="white", activebackground=c["accent2"], relief="flat", pady=4, cursor="hand2")
+            btn_win.pack(fill="x")
+
+            return {
+                "txt": txt, "status": lbl_status, "ttft": lbl_ttft,
+                "tps": lbl_tps, "lat": lbl_lat, "tok": lbl_tok, "btn_win": btn_win
+            }
+
+        pane_a = make_pane(0, model_a_var, "A")
+        pane_b = make_pane(1, model_b_var, "B")
+
+        # Bottom Controls
+        bottom_frame = tk.Frame(win, bg=c["panel"])
+        bottom_frame.pack(fill="x", padx=18, pady=(0, 10))
+
+        tk.Label(bottom_frame, text=self.t("arena_prompt_placeholder"),
+                 bg=c["panel"], fg=c["muted"], font=("Segoe UI", 8)).pack(anchor="w")
+
+        prompt_box = tk.Text(bottom_frame, height=2, wrap="word", font=("Segoe UI", 10),
+                             bg=c["entry"], fg=c["text"], insertbackground=c["text"], relief="flat",
+                             highlightthickness=1, highlightbackground=c["border"])
+        prompt_box.pack(fill="x", pady=(2, 6))
+        prompt_box.focus_set()
+
+        ctrl_row = tk.Frame(bottom_frame, bg=c["panel"])
+        ctrl_row.pack(fill="x")
+
+        def update_pane_ui(pane_data: dict, metric: ArenaMetric):
+            if not win.winfo_exists():
+                return
+            if metric.error:
+                pane_data["status"].configure(text=self.t("arena_status_error", error=metric.error[:24]), fg=c["accent2"])
+            elif metric.status == "generating":
+                pane_data["status"].configure(text=self.t("arena_status_streaming"), fg=c["accent"])
+            elif metric.status == "completed":
+                pane_data["status"].configure(text=self.t("arena_status_completed"), fg="#10B981")
+
+            pane_data["ttft"].configure(text=self.t("arena_ttft_label", val=metric.ttft) if metric.ttft > 0 else "TTFT: —")
+            pane_data["tps"].configure(text=self.t("arena_tps_label", val=metric.tps) if metric.tps > 0 else "Speed: —")
+            pane_data["lat"].configure(text=self.t("arena_latency_label", val=metric.total_latency) if metric.total_latency > 0 else "Latency: —")
+            pane_data["tok"].configure(text=self.t("arena_tokens_label", val=metric.token_count) if metric.token_count > 0 else "Tokens: —")
+
+        def on_chunk_a(delta: str, metric: ArenaMetric):
+            def step():
+                pane_a["txt"].insert("end", delta)
+                pane_a["txt"].see("end")
+                update_pane_ui(pane_a, metric)
+            self.root.after(0, step)
+
+        def on_chunk_b(delta: str, metric: ArenaMetric):
+            def step():
+                pane_b["txt"].insert("end", delta)
+                pane_b["txt"].see("end")
+                update_pane_ui(pane_b, metric)
+            self.root.after(0, step)
+
+        def on_complete():
+            def step():
+                btn_run.configure(state="normal")
+                btn_stop.configure(state="disabled")
+                update_pane_ui(pane_a, self.arena_session.metrics_a)
+                update_pane_ui(pane_b, self.arena_session.metrics_b)
+                if not self.arena_session.metrics_a.error and self.arena_session.text_a:
+                    pane_a["btn_win"].configure(state="normal")
+                if not self.arena_session.metrics_b.error and self.arena_session.text_b:
+                    pane_b["btn_win"].configure(state="normal")
+            self.root.after(0, step)
+
+        def do_run(_event=None):
+            prompt = prompt_box.get("1.0", "end").strip()
+            if not prompt:
+                return
+            pane_a["txt"].delete("1.0", "end")
+            pane_b["txt"].delete("1.0", "end")
+            pane_a["btn_win"].configure(state="disabled")
+            pane_b["btn_win"].configure(state="disabled")
+            btn_run.configure(state="disabled")
+            btn_stop.configure(state="normal")
+
+            self.arena_session = ArenaSession(model_a_var.get(), model_b_var.get())
+            persona = self.persona_manager.get_persona(self.current_persona_id)
+            sys_prompt = build_system_prompt(self.language, local_datetime_text(),
+                                             persona_prompt=persona.system_prompt)
+            self.arena_session.dispatch(prompt, sys_prompt, on_chunk_a, on_chunk_b, on_complete)
+
+        def do_stop():
+            if self.arena_session:
+                self.arena_session.cancel()
+            btn_run.configure(state="normal")
+            btn_stop.configure(state="disabled")
+
+        def choose_winner(choice: str):
+            if not self.arena_session:
+                return
+            result = self.arena_session.select_winner(choice)
+            prompt = self.arena_session.prompt
+
+            chat = self.current_chat()
+            if not chat:
+                self.make_draft()
+                chat = self.current_chat()
+
+            user_msg = {"role": "user", "content": prompt, "time": message_time_text()}
+            asst_msg = {
+                "role": "assistant",
+                "content": result["content"],
+                "time": message_time_text(),
+            }
+            chat["messages"].extend([user_msg, asst_msg])
+
+            if chat.get("title") in ("New Chat", "", None):
+                chat["title"] = prompt[:30].strip() or "Arena Chat"
+
+            self.save_history()
+            self.refresh_history_list()
+            self.display_chat()
+            win.destroy()
+            messagebox.showinfo(self.t("arena_title"),
+                                self.t("arena_winner_toast", model=result["arena"]["model"]),
+                                parent=self.root)
+
+        pane_a["btn_win"].configure(command=lambda: choose_winner("A"))
+        pane_b["btn_win"].configure(command=lambda: choose_winner("B"))
+
+        btn_run = Button(ctrl_row, text=self.t("arena_run_btn"), command=do_run,
+                         bg=c["accent"], fg="white", activebackground=c["accent2"],
+                         relief="flat", padx=12, pady=5, cursor="hand2")
+        btn_run.pack(side="left", padx=(0, 6))
+
+        btn_stop = Button(ctrl_row, text=self.t("arena_stop_btn"), command=do_stop, state="disabled",
+                          bg=c["accent2"], fg="white", activebackground=c["danger"],
+                          relief="flat", padx=10, pady=5, cursor="hand2")
+        btn_stop.pack(side="left", padx=(0, 6))
+
+        Button(ctrl_row, text=self.t("persona_close_btn"), command=win.destroy,
+               bg=c["border"], fg=c["text"], relief="flat", padx=12, pady=5, cursor="hand2").pack(side="right")
+
+        win.prompt_box = prompt_box
+        win.btn_run = btn_run
+        win.btn_stop = btn_stop
+        win.pane_a = pane_a
+        win.pane_b = pane_b
+        win.do_run = do_run
+        win.do_stop = do_stop
+        win.choose_winner = choose_winner
+        win.model_a_var = model_a_var
+        win.model_b_var = model_b_var
         return win
 
     def clear_chat(self):
