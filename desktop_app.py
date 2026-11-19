@@ -25,6 +25,7 @@ from PySide6.QtWidgets import (QApplication, QComboBox, QDialog, QFileDialog, QF
                                QWidget)
 
 import jugnu_core as core
+from analytics import InferenceMetrics
 from automation_dialog import AutomationDialog
 from command_palette import Command, CommandPaletteDialog, CommandRegistry, ShortcutsHelpDialog
 from context_ingest import (
@@ -137,6 +138,7 @@ from personas import get_default_manager, get_persona, list_personas
 from scheduler import BackgroundScheduler, CronEvaluator, ScheduledTask, TaskStore
 from search_engine import SearchEngine
 from strings import get_string, next_language
+from titling import generate_ai_title, generate_heuristic_title
 from tray_daemon import JugnuTrayIcon
 from tts import RATE_MAX, RATE_MIN, TTSManager
 
@@ -479,9 +481,10 @@ class BubbleText(QTextBrowser):
 class Bubble(QFrame):
     """One chat message: name, time, Copy (and Read aloud for replies) above the text."""
 
-    def __init__(self, app, role, text, timestamp=None):
+    def __init__(self, app, role, text, timestamp=None, metrics=None):
         super().__init__()
         self.app, self.text = app, text
+        self.metrics = metrics
         is_user = role == "user"
         self.setObjectName("bubble")
         self.setProperty("role", "user" if is_user else "assistant")
@@ -502,6 +505,14 @@ class Bubble(QFrame):
             self.time_label.setObjectName("bubbleTime")
             header.addWidget(self.time_label)
         header.addStretch(1)
+        self.hud_btn = None
+        if not is_user and metrics and getattr(app, "show_performance_hud", True):
+            metrics_obj = InferenceMetrics.from_dict(metrics) if isinstance(metrics, dict) else metrics
+            if metrics_obj and (metrics_obj.tps > 0 or metrics_obj.total_duration_s > 0):
+                self.hud_btn = self.small_button(metrics_obj.short_badge, lambda: app.show_metrics_dialog(metrics_obj))
+                self.hud_btn.setObjectName("hudBadge")
+                self.hud_btn.setToolTip(metrics_obj.tooltip)
+                header.addWidget(self.hud_btn)
         self.copy_btn = self.small_button(COPY_TEXT, self.copy_message)
         header.addWidget(self.copy_btn)
         self.read_btn = None
@@ -950,6 +961,7 @@ class JugnuWindow(QMainWindow):
         self.dark_mode = core.load_dark_mode(settings_file)
         self.voice_enabled = core.load_voice_enabled(settings_file)
         self.language = core.load_language(settings_file)
+        self.show_performance_hud = core.load_performance_hud(settings_file)
         self.voice_rate, self.voice_volume, self.voice_id = core.load_voice_prefs(settings_file)
         self.tts = TTSManager(rate=self.voice_rate, volume=self.voice_volume,
                               voice_id=self.voice_id)  # Offline voice output; runs on its own thread.
@@ -1301,6 +1313,7 @@ class JugnuWindow(QMainWindow):
 
         QShortcut(QKeySequence("Ctrl+N"), self, self.new_chat)
         QShortcut(QKeySequence("Ctrl+F"), self, self.focus_search)
+        QShortcut(QKeySequence("Ctrl+H"), self, self.toggle_performance_hud)
         QShortcut(QKeySequence("Ctrl+K"), self, self.open_command_palette)
         QShortcut(QKeySequence("Ctrl+D"), self, self.toggle_theme)
         QShortcut(QKeySequence("Ctrl+L"), self, self.toggle_language)
@@ -1312,6 +1325,26 @@ class JugnuWindow(QMainWindow):
         QShortcut(QKeySequence("Ctrl+/"), self, self.open_shortcuts_help)
         QShortcut(QKeySequence("Escape"), self, self.handle_escape)
         QShortcut(QKeySequence("Ctrl+Q"), self, self.close)
+
+    def toggle_performance_hud(self):
+        self.show_performance_hud = not self.show_performance_hud
+        core.save_settings(self.settings_file, show_performance_hud=self.show_performance_hud)
+        self.display_chat()
+
+    def show_metrics_dialog(self, metrics):
+        title = self.t("hud_dialog_title")
+        content = (
+            f"⚡ {self.t('hud_speed')}: {metrics.tps:.1f} tokens/s\n"
+            f"🎯 {self.t('hud_tokens')}: {metrics.eval_count} tokens ({metrics.eval_duration_s:.2f}s)\n"
+            f"⏱️ {self.t('hud_total_time')}: {metrics.total_duration_s:.2f}s\n"
+            f"🚀 {self.t('hud_ttft')}: {metrics.ttft_ms:.1f}ms\n"
+            f"🤖 {self.t('hud_model')}: {metrics.model or 'default'}"
+        )
+        msg_box = QMessageBox(self)
+        msg_box.setWindowTitle(title)
+        msg_box.setText(content)
+        msg_box.setIcon(QMessageBox.Information)
+        msg_box.exec()
 
     def focus_search(self):
         self.search_entry.setFocus()
@@ -1536,6 +1569,10 @@ class JugnuWindow(QMainWindow):
                                     selectbackground=c["accent"], selectforeground="white")
         for btn in [self.new_btn, self.theme_btn, self.voice_btn, self.language_btn,
                     self.voice_settings_btn, self.persona_studio_btn]:
+        self.history_list.configure(bg=c["sidebar"], fg=c["text"],
+                                    selectbackground=c["accent"], selectforeground="white")
+        for btn in [self.new_btn, self.theme_btn, self.voice_btn, self.language_btn,
+                    self.voice_settings_btn]:
             btn.configure(bg=c["accent"], fg="white", activebackground=c["accent2"],
                           activeforeground="white", cursor="hand2")
         self.voice_btn.configure(text=self.voice_button_text())
@@ -2124,6 +2161,7 @@ class JugnuWindow(QMainWindow):
         self.persona_studio_btn.configure(text=self.t("persona_studio_btn"))
         self.update_voice_window()
         self.update_persona_ui()
+        self.update_voice_window()
         self.language_btn.configure(text=self.t("language_btn", name=self.t("language_name")))
         self.theme_btn.configure(text=self.theme_button_text())
         self.header_title.configure(text=self.t("header_title"))
@@ -2290,6 +2328,7 @@ class JugnuWindow(QMainWindow):
         if not new_title or new_title == chat.get("title"):
             return  # an empty name is ignored: the old title stays
         chat["title"] = new_title
+        chat["is_custom_title"] = True
         self.save_history()
         self.refresh_history_list()
 
@@ -3117,7 +3156,8 @@ class JugnuWindow(QMainWindow):
         if not messages:
             self.show_welcome()
         for msg in messages:
-            self.add_bubble(msg.get("role"), msg.get("content", ""), timestamp=msg.get("time"))
+            self.add_bubble(msg.get("role"), msg.get("content", ""),
+                            timestamp=msg.get("time"), metrics=msg.get("metrics"))
         self.scroll_to_bottom()
 
     def show_welcome(self):
@@ -3139,10 +3179,10 @@ class JugnuWindow(QMainWindow):
             layout.addWidget(widget, 0, Qt.AlignHCenter)
         self.messages_layout.insertWidget(self.messages_layout.count() - 1, welcome)
 
-    def add_bubble(self, role, text, timestamp=None):
+    def add_bubble(self, role, text, timestamp=None, metrics=None):
         if not self.bubbles and self.messages_layout.count() > 1:
             self.clear_messages()  # the first message replaces the welcome splash
-        bubble = Bubble(self, role, text, timestamp)
+        bubble = Bubble(self, role, text, timestamp, metrics=metrics)
         bubble.fit(max_bubble_width(self.scroll.viewport().width()))
         row = QHBoxLayout()
         row.setContentsMargins(0, 0, 0, 0)
@@ -3259,8 +3299,13 @@ class JugnuWindow(QMainWindow):
             self.chats.append(self.draft_chat)
             self.draft_chat = None
         if chat.get("title") == core.NEW_CHAT_TITLE:
-            default_title = user_text if user_text else (f"Attachment: {self.attachments[0].filename}" if self.attachments else "Chat")
-            chat["title"] = default_title[:core.MAX_LIST_TITLE]
+            if core.local_answer(user_text, self.language) is not None:
+                chat["title"] = user_text[:core.MAX_LIST_TITLE]
+            elif user_text:
+                chat["title"] = generate_heuristic_title(user_text)
+            else:
+                default_title = f"Attachment: {self.attachments[0].filename}" if self.attachments else "Chat"
+                chat["title"] = default_title[:core.MAX_LIST_TITLE]
         time_now = core.message_time_text()
 
         prompt_with_attachments = (
@@ -3638,22 +3683,29 @@ class JugnuWindow(QMainWindow):
             answer = get_string(language, "error_generic", error=result.detail)
         self.root.after(0, lambda: self.finish_answer(answer, chat_id, is_error=is_error))
         self.start_task(lambda: (chat_id, *core.ask_ollama(chat, language)), self.on_answer)
+        def work():
+            reply = core.ask_ollama(chat, language)
+            metrics = getattr(reply, "metrics", None)
+            return (chat_id, reply[0], reply[1], metrics)
+        self.start_task(work, self.on_answer)
 
     def on_answer(self, result):
         self.finish_answer(*result)
 
-    def finish_answer(self, chat_id, answer, is_error=False):
+    def finish_answer(self, chat_id, answer, is_error=False, metrics=None):
         chat = self.find_chat(chat_id)  # may be gone if it was deleted while the request ran
         time_now = core.message_time_text()
         if chat and isinstance(answer, str) and answer.strip():
             message = {"role": "assistant", "content": answer, "time": time_now}
             if is_error:
                 message["is_error"] = True
+            if metrics:
+                message["metrics"] = metrics.to_dict() if hasattr(metrics, "to_dict") else metrics
             chat["messages"].append(message)
             self.save_history()
             # Only display if the user is still viewing the chat that received the answer.
             if chat_id == self.current_id:
-                self.add_bubble("assistant", answer, timestamp=time_now)
+                self.add_bubble("assistant", answer, timestamp=time_now, metrics=metrics)
                 self.scroll_to_bottom()
                 if self.voice_enabled:
                     self.tts.speak(plain_text(answer))
@@ -3661,6 +3713,18 @@ class JugnuWindow(QMainWindow):
         self.send_btn.setEnabled(True)
         self.set_status("status_ready")
         self.refresh_history_list()
+
+    def start_ai_titling(self, chat_id, first_user_prompt):
+        def work():
+            return generate_ai_title(first_user_prompt)
+        def slot(ai_title):
+            if ai_title:
+                chat = self.find_chat(chat_id)
+                if chat and not chat.get("is_custom_title"):
+                    chat["title"] = ai_title
+                    self.save_history()
+                    self.refresh_history_list()
+        self.start_task(work, slot)
 
     def closeEvent(self, event):
         self.closed = True
