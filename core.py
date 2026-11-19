@@ -287,6 +287,9 @@ def stream_chat(messages, *, model=None, timeout=120, keep_alive=None, options=N
       {"error": str, "detail": str, "done": True}
     """
     payload = {"model": model or MODEL, "messages": messages, "stream": True}
+def stream_chat(messages, *, timeout=180, keep_alive=None, options=None):
+    """Send `messages` to Ollama with stream=True and return the streaming response object."""
+    payload = {"model": MODEL, "messages": messages, "stream": True}
     if keep_alive is not None:
         payload["keep_alive"] = keep_alive
     if options is not None:
@@ -316,3 +319,4 @@ def stream_chat(messages, *, model=None, timeout=120, keep_alive=None, options=N
         yield {"error": ERROR_CONNECTION, "detail": "Cannot connect to Ollama", "done": True}
     except Exception as error:
         yield {"error": ERROR_OTHER, "detail": str(error), "done": True}
+    return requests.post(OLLAMA_URL, json=payload, stream=True, timeout=timeout)
